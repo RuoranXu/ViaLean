@@ -7,6 +7,7 @@ import ViaLean.Proposers.Witness
 import ViaLean.Proposers.Library
 import ViaLean.Proposers.Iff
 import ViaLean.Scheduler.UCB
+import ViaLean.Model.Guidance
 
 open Lean Meta
 
@@ -28,6 +29,7 @@ structure SearchState where
   config : ProposeConfig
   budget : Budget
   scheduler : SchedulerState
+  guidanceCache : IO.Ref (Std.HashMap UInt64 (Option ModelGuidance))
   path   : SearchPath := {}
   maxLeafSec? : Option Nat := none
 
@@ -74,15 +76,61 @@ private def cheapClose? (snap : GoalSnapshot) : MetaM (Option Expr) := do
     return some (mkConst ``True.intro)
   return none
 
-private def orderActions (state : SearchState) (actions : Array ProofAction) : MetaM (Array ProofAction) := do
-  if state.config.deterministic || !state.config.ucb then return actions
+private def orderActions
+    (state : SearchState) (guidance? : Option ModelGuidance)
+    (actions : Array ProofAction) : MetaM (Array ProofAction) := do
+  if guidance?.isNone && (state.config.deterministic || !state.config.ucb) then return actions
   let stats ← state.scheduler.snapshot
   let total := stats.fold (init := 0) fun total _ family => total + family.attempts
-  return actions.insertionSort fun a b =>
-    let aStats := (stats.get? a.family).getD {}
-    let bStats := (stats.get? b.family).getD {}
-    ucbScore aStats total a.prior state.config.ucbExploration state.config.ucbPriorWeight >
-      ucbScore bStats total b.prior state.config.ucbExploration state.config.ucbPriorWeight
+  let baseScore (action : ProofAction) :=
+    if state.config.deterministic || !state.config.ucb then action.prior
+    else
+      let familyStats := (stats.get? action.family).getD {}
+      ucbScore familyStats total action.prior
+        state.config.ucbExploration state.config.ucbPriorWeight
+  let score (action : ProofAction) :=
+    let base := baseScore action
+    let signal? := guidance?.bind fun guidance => ModelProtocol.ModelGuidance.score? guidance action.fingerprint
+    ModelProtocol.blendScore base signal? state.config.modelWeight
+  return actions.insertionSort fun a b => score a > score b
+
+private def collectActions
+    (snap : GoalSnapshot) (state : SearchState) : MetaM (Array ProofAction) := do
+  let cfg := state.config
+  let mut actions := #[]
+  if cfg.structural then
+    actions := actions ++ (structuralProposals snap cfg).map Proposal.compile
+  if cfg.equalityBridge && snap.shape == .equality then
+    actions := actions ++ (← equalityProposals snap cfg).map Proposal.compile
+  if cfg.iffBridge && snap.shape == .iff then
+    actions := actions ++ (← iffProposals snap cfg).map Proposal.compile
+  if cfg.witnesses && snap.shape == .exists then
+    actions := actions ++ (← witnessProposals snap cfg).map Proposal.compile
+  if cfg.cuts then
+    actions := actions ++ (← localCutProposals snap cfg).map Proposal.compile
+  if cfg.library && cfg.cuts then
+    let premises ← libraryPremiseProvider.retrieve snap cfg.maxCandidates
+    actions := actions ++ (← libraryCutProposals snap cfg premises).map Proposal.compile
+  return actions
+
+private def guidanceFor?
+    (snap : GoalSnapshot) (actions : Array ProofAction)
+    (state : SearchState) (depth : Nat) : MetaM (Option ModelGuidance) := do
+  if !state.config.ai || actions.isEmpty then return none
+  if let some cached := (← state.guidanceCache.get).get? snap.fingerprint then
+    return cached
+  let result ← ModelGuidanceEngine.query? snap actions depth state.config state.budget
+  let guidance? ← match result with
+    | .ok guidance =>
+        if state.config.trace then
+          trace[ViaLean.model]
+            "depth={depth}, value={guidance.value}, scored={guidance.actionScores.size}"
+        pure (some guidance)
+    | .error error =>
+        if state.config.trace then trace[ViaLean.model] "fallback: {error}"
+        pure none
+  state.guidanceCache.modify (·.insert snap.fingerprint guidance?)
+  return guidance?
 
 mutual
   partial def solveGoal?
@@ -104,52 +152,14 @@ mutual
           tryProofAction? snap nativeCloseAction state depth then
         return some proof
 
-      if state.config.structural then
-        for proposal in structuralProposals snap state.config do
-          if let some proof ← observingMeta? <|
-              tryProofAction? snap proposal.compile state depth then
-            return some proof
-
-      if state.config.equalityBridge && snap.shape == .equality then
-        let actions ← orderActions state <|
-          (← equalityProposals snap state.config).map Proposal.compile
-        for action in actions do
-          unless ← hasSpeculativeBudget state do break
-          if let some proof ← observingMeta? <| tryProofAction? snap action state depth then
-            return some proof
-
-      if state.config.iffBridge && snap.shape == .iff then
-        let actions ← orderActions state <|
-          (← iffProposals snap state.config).map Proposal.compile
-        for action in actions do
-          unless ← hasSpeculativeBudget state do break
-          if let some proof ← observingMeta? <| tryProofAction? snap action state depth then
-            return some proof
-
-      if state.config.witnesses && snap.shape == .exists then
-        let actions ← orderActions state <|
-          (← witnessProposals snap state.config).map Proposal.compile
-        for action in actions do
-          unless ← hasSpeculativeBudget state do break
-          if let some proof ← observingMeta? <| tryProofAction? snap action state depth then
-            return some proof
-
-      if state.config.cuts then
-        let actions ← orderActions state <|
-          (← localCutProposals snap state.config).map Proposal.compile
-        for action in actions do
-          unless ← hasSpeculativeBudget state do break
-          if let some proof ← observingMeta? <| tryProofAction? snap action state depth then
-            return some proof
-
-      if state.config.library && state.config.cuts then
-        let premises ← libraryPremiseProvider.retrieve snap state.config.maxCandidates
-        let actions ← orderActions state <|
-          (← libraryCutProposals snap state.config premises).map Proposal.compile
-        for action in actions do
-          unless ← hasSpeculativeBudget state do break
-          if let some proof ← observingMeta? <| tryProofAction? snap action state depth then
-            return some proof
+      let actions ← collectActions snap state
+      let guidance? ← guidanceFor? snap actions state depth
+      let actions ← orderActions state guidance? actions
+      for action in actions do
+        unless action.family == .structural do
+          unless ← hasSpeculativeBudget state do continue
+        if let some proof ← observingMeta? <| tryProofAction? snap action state depth then
+          return some proof
 
       -- Preserve a serious direct fallback under the same global deadline.
       let remaining ← state.budget.remainingSecFloor
@@ -245,7 +255,8 @@ def runSearch (goal : MVarId) (config : ProposeConfig) : MetaM SolveResult := do
   let start ← IO.monoMsNow
   let budget ← Budget.start config.timeoutSec
   let scheduler ← SchedulerState.create
-  let proof? ← solveGoal? goal { config, budget, scheduler } 0
+  let guidanceCache ← IO.mkRef {}
+  let proof? ← solveGoal? goal { config, budget, scheduler, guidanceCache } 0
   let elapsed := (← IO.monoMsNow) - start
   match proof? with
   | some proof =>
@@ -258,8 +269,9 @@ def runManualProposal
   goal.withContext do
     let budget ← Budget.start config.timeoutSec
     let scheduler ← SchedulerState.create
+    let guidanceCache ← IO.mkRef {}
     let snap ← snapshot goal
-    tryProofAction? snap proposal.compile { config, budget, scheduler } 0
+    tryProofAction? snap proposal.compile { config, budget, scheduler, guidanceCache } 0
 
 def diagnose (goal : MVarId) (config : ProposeConfig) : MetaM MessageData := goal.withContext do
   let snap ← snapshot goal
@@ -269,7 +281,8 @@ def diagnose (goal : MVarId) (config : ProposeConfig) : MetaM MessageData := goa
   let direct ← if config.directProbeSec = 0 then pure none else do
     let budget ← Budget.start config.directProbeSec
     let scheduler ← SchedulerState.create
-    directProof? goal { config, budget, scheduler } config.directProbeSec
+    let guidanceCache ← IO.mkRef {}
+    directProof? goal { config, budget, scheduler, guidanceCache } config.directProbeSec
   return m!"ViaLean: shape={repr snap.shape}, direct={direct.isSome}, " ++
     m!"equality={equalities.size}, witness={witnesses.size}, cuts={cuts.size}"
 

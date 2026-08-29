@@ -6,3 +6,4 @@ import ViaLeanTest.Witness
 import ViaLeanTest.UCB
 import ViaLeanTest.Soundness
 import ViaLeanTest.Iff
+import ViaLeanTest.Model
