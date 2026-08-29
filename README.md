@@ -1,22 +1,6 @@
 # ViaLean
 
-ViaLean is a small, kernel-checked proof-search engine implemented entirely in Lean 4. It combines bounded native proof search with explicit bridge actions for equality, equivalence, cuts, and existential witnesses.
-
-```lean
-import ViaLean
-
-example : Nat := by
-  propose
-
-example (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by
-  propose via_eq b
-
-example (A B C : Prop) (h₁ : A → B) (h₂ : B → C) (a : A) : C := by
-  propose via_cut B
-
-example (n : Nat) : ∃ x : Nat, x = n := by
-  propose via_witness n
-```
+ViaLean is a small, kernel-checked proof-search engine implemented entirely in Lean 4. It combines bounded native proof search with explicit bridge actions.
 
 ## Design
 
