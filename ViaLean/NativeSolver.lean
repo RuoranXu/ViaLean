@@ -3,6 +3,10 @@ import ViaLean.Solver.Basic
 import ViaLean.Validate
 import Lean.Meta.Tactic.Apply
 import Lean.Meta.Tactic.Intro
+import Lean.Meta.Tactic.Cases
+import Lean.Meta.Tactic.Contradiction
+import Lean.Meta.Tactic.Simp.Main
+import Lean.Meta.Tactic.Simp.Attr
 
 open Lean Meta
 
@@ -12,6 +16,8 @@ structure NativeStats where
   nodes                  : Nat := 0
   attemptedApplications  : Nat := 0
   successfulApplications : Nat := 0
+  attemptedTransforms    : Nat := 0
+  successfulTransforms   : Nat := 0
 deriving Inhabited
 
 structure NativeAttempt where
@@ -84,6 +90,62 @@ mutual
       saved.restore
       return false
 
+  private partial def tryContradiction
+      (goal : MVarId) (ctx : NativeContext) : MetaM Bool := do
+    let saved ← saveState
+    ctx.stats.modify fun s => { s with attemptedTransforms := s.attemptedTransforms + 1 }
+    try
+      goal.contradiction
+      ctx.stats.modify fun s => { s with successfulTransforms := s.successfulTransforms + 1 }
+      return true
+    catch _ =>
+      saved.restore
+      return false
+
+  private partial def trySimp
+      (goal : MVarId) (ctx : NativeContext) (depth : Nat)
+      (path : Std.HashSet UInt64) : MetaM Bool := do
+    let saved ← saveState
+    ctx.stats.modify fun s => { s with attemptedTransforms := s.attemptedTransforms + 1 }
+    try
+      let simpCtx ← Simp.Context.mkDefault
+      let (result, _) ← simpTargetStar goal simpCtx
+      match result with
+      | .closed =>
+          ctx.stats.modify fun s => { s with successfulTransforms := s.successfulTransforms + 1 }
+          return true
+      | .modified child =>
+          if ← solveNativeGoal child ctx (depth + 1) path then
+            ctx.stats.modify fun s => { s with successfulTransforms := s.successfulTransforms + 1 }
+            return true
+          saved.restore
+          return false
+      | .noChange =>
+          saved.restore
+          return false
+    catch _ =>
+      saved.restore
+      return false
+
+  private partial def tryCases
+      (goal : MVarId) (ctx : NativeContext) (depth : Nat)
+      (path : Std.HashSet UInt64) : MetaM Bool := do
+    for decl in ← getLCtx do
+      unless decl.isImplementationDetail do
+        let type ← instantiateMVars decl.type
+        if (← isProp type) && !type.isEq && !type.isHEq then
+          let saved ← saveState
+          ctx.stats.modify fun s => { s with attemptedTransforms := s.attemptedTransforms + 1 }
+          try
+            let branches ← goal.cases decl.fvarId
+            if branches.size > 0 && branches.size ≤ ctx.config.nativeMaxCaseBranches then
+              if ← solveNativeGoals (branches.toList.map (·.mvarId)) ctx (depth + 1) path then
+                ctx.stats.modify fun s => { s with successfulTransforms := s.successfulTransforms + 1 }
+                return true
+            saved.restore
+          catch _ => saved.restore
+    return false
+
   private partial def solveNativeGoal
       (goal : MVarId) (ctx : NativeContext) (depth : Nat)
       (path : Std.HashSet UInt64) : MetaM Bool := do
@@ -105,6 +167,10 @@ mutual
         goal.assign (mkConst ``True.intro)
         return true
 
+      if ctx.config.nativeTransforms then
+        if ← tryContradiction goal ctx then return true
+        if ← trySimp goal ctx depth path then return true
+
       if target.isForall then
         let saved ← saveState
         try
@@ -123,6 +189,9 @@ mutual
           if !(← ctx.beforeDeadline) then return false
           if ← tryApply goal (mkFVar decl.fvarId) ctx depth path then
             return true
+
+      if ctx.config.nativeTransforms && ctx.config.nativeCases then
+        if ← tryCases goal ctx depth path then return true
 
       for premise in ctx.premises do
         if !(← ctx.beforeDeadline) then return false
@@ -187,7 +256,7 @@ def nativeLeafSolver (cfg : ProposeConfig) : LeafSolver where
       elapsedMs := result.elapsedMs
       progress := if result.proof?.isSome then 1.0 else 0.0
       diagnostics? := if request.wantDiagnostics then
-        some s!"nodes={result.stats.nodes}, applications={result.stats.attemptedApplications}"
+        some s!"nodes={result.stats.nodes}, applications={result.stats.attemptedApplications}, transforms={result.stats.successfulTransforms}/{result.stats.attemptedTransforms}"
       else none
     }
 

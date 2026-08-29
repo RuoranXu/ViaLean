@@ -46,3 +46,47 @@ example (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by
     (modelReplayResponse := "{\"value\":0.9,\"actions\":[]}")
     (directProbeSec := 0)
     (structural := false)
+#guard
+  match ModelProtocol.parseContinuation
+      "```json\n{\"continue\":[{\"index\":1},{\"id\":\"17\"},\"23\",{\"unknown\":true}],\"rationale\":\"use search feedback\"}\n```" with
+  | .ok continuation =>
+      continuation.selections.size == 3 &&
+      continuation.selections[0]!.index? == some 1 &&
+      continuation.selections[1]!.actionId? == some 17 &&
+      continuation.selections[2]!.actionId? == some 23
+  | .error _ => false
+
+#guard
+  let request : InteractionRequest := {
+    requestId := "goal-1"
+    round := 2
+    depth := 1
+    shape := "proposition"
+    target := "R"
+    locals := #["h : P ∨ Q"]
+    actions := #[]
+    feedback := #[{
+      sequence := 0
+      depth := 3
+      goal := "R"
+      actionId := "17"
+      family := "structural"
+      outcome := "failed"
+      elapsedMs := 4
+    }]
+  }
+  let text := ModelProtocol.interactionRequestText request
+  text.contains "\"protocol\":\"vialean.interactive.v1\"" &&
+  text.contains "\"search_feedback\"" && text.contains "\"depth\":3" &&
+  text.contains "\"action\":\"\"" && !text.contains "\"prior\""
+
+example (P : Prop) : P → P := by
+  propose
+    (ai := true)
+    (modelMode := "interactive")
+    (modelProvider := "replay")
+    (modelReplayResponse := "{\"continue\":[{\"index\":0}],\"rationale\":\"expand implication\"}")
+    (directProbeSec := 0)
+    (cuts := false)
+    (library := false)
+    (maxDepth := 3)

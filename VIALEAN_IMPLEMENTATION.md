@@ -8,19 +8,22 @@ The engine is deliberately bounded. It is intended to find short compositional p
 
 ## Search model
 
-A search node owns a goal, remaining budget, depth, path fingerprints, and a shared guidance cache. The controller first tries a cheap native close, then constructs every enabled proof action. When model guidance is enabled, an untrusted provider returns a node value and scores for those existing action IDs. ViaLean mixes the scores with local priors, tries each action under a saved metavariable state, and restores failed branches.
+A search node owns a goal, remaining budget, depth, path fingerprints, discrete feedback storage, and a shared guidance cache. The controller first tries a cheap native close, then constructs every enabled proof action. Policy mode mixes untrusted scores over existing actions with local priors. Interactive mode instead chooses one existing action, disables further model calls during its multi-depth branch search, records discrete action/depth/outcome events, and exposes those events to the next model round. Every failed branch restores its metavariable state.
 
 The native solver supports:
 
 - exact local hypotheses;
 - reflexive equality and `True`;
+- contradiction detection across local hypotheses;
+- simplification and target rewriting using local propositions and equality hypotheses;
 - dependent introductions;
 - inductive constructors;
+- bounded case analysis over propositional inductive hypotheses;
 - application of local declarations;
 - application of explicitly supplied global premises;
 - recursive solving of all generated subgoals.
 
-`nativeMaxDepth` and `nativeMaxApplications` bound recursive expansion. The controller's deadline is passed to every leaf and model attempt, so nested search cannot silently acquire a fresh unbounded timeout.
+`nativeMaxDepth`, `nativeMaxApplications`, and `nativeMaxCaseBranches` bound recursive and branching expansion. `nativeTransforms` and `nativeCases` can disable the additional transform layers. The controller's deadline is passed to every leaf and model attempt, so nested search cannot silently acquire a fresh unbounded timeout.
 
 ## Modules
 
@@ -29,11 +32,11 @@ The native solver supports:
 - `ViaLean/Proposal.lean`: proposal protocol and deterministic ranking.
 - `ViaLean/Action.lean`: project-owned proof-action representation.
 - `ViaLean/NativeSolver.lean`: independent bounded leaf solver.
-- `ViaLean/Model/Protocol.lean`: stable JSON request/response types and score validation.
+- `ViaLean/Model/Protocol.lean`: stable policy and interactive JSON types, bounds, and validation.
 - `ViaLean/Model/Process.lean`: shell-free process execution with termination on timeout.
 - `ViaLean/Model/Provider.lean`: command, replay, and OpenAI-compatible transports.
-- `ViaLean/Model/Guidance.lean`: bounded request rendering for each search node.
-- `ViaLean/Search.lean`: AND/OR controller, guidance cache, score mixing, and rollback boundaries.
+- `ViaLean/Model/Guidance.lean`: bounded policy requests and interactive search-feedback rendering.
+- `ViaLean/Search.lean`: AND/OR controller, dual model modes, feedback events, and rollback boundaries.
 - `ViaLean/Compose.lean`: proof construction for successful actions.
 - `ViaLean/Validate.lean`: target checking and metavariable rejection.
 - `ViaLean/Tactic.lean`: `propose` and `propose?` syntax.
@@ -45,10 +48,11 @@ The native solver supports:
 2. A returned expression is checked against the requested target.
 3. Failed branches cannot retain assignments in the caller's metavariable context.
 4. Search never uses `sorry`, `admit`, `unsafe`, native code loading, or generated proof text.
-5. A model can score only action IDs already built by ViaLean; it cannot create an executable action.
-6. Provider failures and malformed output degrade to native search.
-7. Provider processes have a per-call timeout capped by the global deadline.
-8. The original goal is assigned only after the complete candidate proof validates.
+5. A model can only score or select action IDs already built by ViaLean; it cannot create an executable action.
+6. Interactive model-selected branches disable nested model calls and return only discrete native-search feedback.
+7. Provider failures and malformed output degrade to native search.
+8. Provider processes have a per-call timeout capped by the global deadline.
+9. The original goal is assigned only after the complete candidate proof validates.
 
 ## Compatibility policy
 

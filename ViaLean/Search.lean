@@ -30,8 +30,10 @@ structure SearchState where
   budget : Budget
   scheduler : SchedulerState
   guidanceCache : IO.Ref (Std.HashMap UInt64 (Option ModelGuidance))
+  feedback : IO.Ref (Array SearchFeedback)
   path   : SearchPath := {}
   maxLeafSec? : Option Nat := none
+  modelEnabled : Bool := true
 
 /-- Restore the metavariable context after an exception or failed branch. -/
 def observingMeta? (action : MetaM (Option α)) : MetaM (Option α) := do
@@ -113,10 +115,25 @@ private def collectActions
     actions := actions ++ (← libraryCutProposals snap cfg premises).map Proposal.compile
   return actions
 
+private def modelMode (state : SearchState) : String :=
+  state.config.modelMode.trimAscii.toString.toLower
+
+private def feedbackActionName (action : ProofAction) : String :=
+  match action.payload with
+  | .close solver => s!"close/{(repr solver).pretty}"
+  | .structural rule => s!"structural/{(repr rule).pretty}"
+  | .proposal proposal => s!"{(repr proposal.kind).pretty}/{proposal.source}"
+  | .sketch holes => s!"sketch/{holes.size}"
+private def feedbackWindow (state : SearchState) : MetaM (Array SearchFeedback) := do
+  let events ← state.feedback.get
+  let limit := state.config.modelMaxFeedbackEvents
+  if limit = 0 then return #[]
+  let start := events.size - min events.size limit
+  return events.extract start events.size
 private def guidanceFor?
     (snap : GoalSnapshot) (actions : Array ProofAction)
     (state : SearchState) (depth : Nat) : MetaM (Option ModelGuidance) := do
-  if !state.config.ai || actions.isEmpty then return none
+  if !state.config.ai || !state.modelEnabled || modelMode state != "policy" || actions.isEmpty then return none
   if let some cached := (← state.guidanceCache.get).get? snap.fingerprint then
     return cached
   let result ← ModelGuidanceEngine.query? snap actions depth state.config state.budget
@@ -153,6 +170,9 @@ mutual
         return some proof
 
       let actions ← collectActions snap state
+      if state.modelEnabled && modelMode state == "interactive" then
+        if let some proof ← observingMeta? <| tryInteractive? snap actions state depth then
+          return some proof
       let guidance? ← guidanceFor? snap actions state depth
       let actions ← orderActions state guidance? actions
       for action in actions do
@@ -237,16 +257,67 @@ mutual
       return some (← composeAction snap.target (.existsIntro witness) #[childProof])
     | .structural _ => tryStructural? snap state depth
 
+  partial def tryInteractive?
+      (snap : GoalSnapshot) (actions : Array ProofAction)
+      (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
+    if actions.isEmpty || state.config.modelMaxRounds = 0 then return none
+    let mut attempted : Std.HashSet UInt64 := {}
+    for round in [0:state.config.modelMaxRounds] do
+      if (← state.budget.remainingMs) = 0 then break
+      let feedback ← feedbackWindow state
+      let response ← ModelGuidanceEngine.queryInteraction?
+        snap actions depth round feedback state.config state.budget
+      let continuation ← match response with
+        | .ok continuation => pure continuation
+        | .error error =>
+            if state.config.trace then trace[ViaLean.model] "interactive fallback: {error}"
+            break
+      if state.config.trace then
+        trace[ViaLean.model]
+          "interactive round={round}, feedback={feedback.size}, selections={continuation.selections.size}"
+      let mut madeProgress := false
+      for selection in continuation.selections do
+        let action? := match selection.actionId? with
+          | some id => actions.find? fun (action : ProofAction) => action.fingerprint == id
+          | none => selection.index?.bind fun index => actions[index]?
+        let some action := action? | continue
+        if attempted.contains action.fingerprint then continue
+        attempted := attempted.insert action.fingerprint
+        madeProgress := true
+        let childState := { state with modelEnabled := false }
+        if let some proof ← observingMeta? <| tryProofAction? snap action childState depth then
+          return some proof
+        -- Strict interleaving: report this failed non-model search before another choice.
+        break
+      if !madeProgress then break
+    return none
   partial def tryProofAction?
       (snap : GoalSnapshot) (action : ProofAction)
       (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
+    let started ← IO.monoMsNow
     let result ← match action.payload with
       | .close .native => directProof? snap.goalId state state.config.directProbeSec
       | .close _ => pure none
       | .structural _ => tryStructural? snap state depth
       | .proposal proposal => tryProposal? snap proposal state depth
       | .sketch _ => pure none
+    let elapsedMs := (← IO.monoMsNow) - started
     state.scheduler.record action.family (if result.isSome then 1.0 else 0.0)
+    if modelMode state == "interactive" then
+      let events ← state.feedback.get
+      let rendered := (← ppExpr snap.target).pretty
+      let goalText := if rendered.length ≤ 512 then rendered else (rendered.take 512).toString ++ "…"
+      let event : SearchFeedback := {
+        sequence := events.size
+        depth
+        goal := goalText
+        actionId := toString action.fingerprint
+        family := (repr action.family).pretty
+        action := feedbackActionName action
+        outcome := if result.isSome then "solved" else "failed"
+        elapsedMs
+      }
+      state.feedback.set (events.push event)
     return result
 
 end
@@ -256,7 +327,8 @@ def runSearch (goal : MVarId) (config : ProposeConfig) : MetaM SolveResult := do
   let budget ← Budget.start config.timeoutSec
   let scheduler ← SchedulerState.create
   let guidanceCache ← IO.mkRef {}
-  let proof? ← solveGoal? goal { config, budget, scheduler, guidanceCache } 0
+  let feedback ← IO.mkRef #[]
+  let proof? ← solveGoal? goal { config, budget, scheduler, guidanceCache, feedback } 0
   let elapsed := (← IO.monoMsNow) - start
   match proof? with
   | some proof =>
@@ -270,8 +342,9 @@ def runManualProposal
     let budget ← Budget.start config.timeoutSec
     let scheduler ← SchedulerState.create
     let guidanceCache ← IO.mkRef {}
+    let feedback ← IO.mkRef #[]
     let snap ← snapshot goal
-    tryProofAction? snap proposal.compile { config, budget, scheduler, guidanceCache } 0
+    tryProofAction? snap proposal.compile { config, budget, scheduler, guidanceCache, feedback } 0
 
 def diagnose (goal : MVarId) (config : ProposeConfig) : MetaM MessageData := goal.withContext do
   let snap ← snapshot goal
@@ -282,7 +355,8 @@ def diagnose (goal : MVarId) (config : ProposeConfig) : MetaM MessageData := goa
     let budget ← Budget.start config.directProbeSec
     let scheduler ← SchedulerState.create
     let guidanceCache ← IO.mkRef {}
-    directProof? goal { config, budget, scheduler, guidanceCache } config.directProbeSec
+    let feedback ← IO.mkRef #[]
+    directProof? goal { config, budget, scheduler, guidanceCache, feedback } config.directProbeSec
   return m!"ViaLean: shape={repr snap.shape}, direct={direct.isSome}, " ++
     m!"equality={equalities.size}, witness={witnesses.size}, cuts={cuts.size}"
 

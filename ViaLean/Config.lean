@@ -19,6 +19,7 @@ structure ProposeConfig where
   witnesses              : Bool := true
   library                : Bool := true
   ai                     : Bool := false
+  modelMode               : String := "policy"
   modelProvider          : String := "none"
   modelCommand           : String := ""
   modelCommandArgsJson   : String := "[]"
@@ -34,6 +35,8 @@ structure ProposeConfig where
   modelContextChars      : Nat := 12000
   modelTemperature       : Float := 0.0
   modelWeight            : Float := 0.65
+  modelMaxRounds          : Nat := 4
+  modelMaxFeedbackEvents  : Nat := 48
   allowTypeCuts          : Bool := false
   ucb                     : Bool := true
   ucbExploration         : Float := 0.8
@@ -42,5 +45,8 @@ structure ProposeConfig where
   deterministic          : Bool := true
   nativeMaxDepth         : Nat := 8
   nativeMaxApplications  : Nat := 256
+  nativeTransforms        : Bool := true
+  nativeCases             : Bool := true
+  nativeMaxCaseBranches   : Nat := 6
 
 end ViaLean

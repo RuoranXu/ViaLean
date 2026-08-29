@@ -1,127 +1,153 @@
 # Model guidance
 
-ViaLean treats an external model as an untrusted value-and-policy oracle. The model receives a bounded text view of the current goal and an array of actions already constructed by ViaLean. It returns a goal value and scores for those action IDs. It never returns proof terms, tactics, shell commands, or new action payloads.
+ViaLean exposes two model modes over the same bounded, untrusted transport. Both modes receive only a rendered goal, local declarations, and actions already constructed by ViaLean. Neither mode accepts proof terms, tactic programs, shell commands, or new action payloads.
 
-## Search integration
+## Interactive mode: search feedback, no scores
 
-For every unresolved node after the cheap native probe:
-
-1. ViaLean builds all enabled structural, equality, equivalence, witness, local-cut, and library-cut actions.
-2. The request is bounded by `modelContextChars` and cached by the goal fingerprint.
-3. The provider receives at most `modelTimeoutMs`, additionally capped by the global search deadline.
-4. Returned scores are clamped to `[0, 1]` and mixed with internal priors using `modelWeight`.
-5. The reordered actions run through the normal rollback, validation, composition, and kernel-checking path.
-
-Malformed responses, process errors, HTTP errors, and timeouts are cached as a miss for that node. Search continues without model guidance.
-
-## OpenAI-compatible API
-
-This mode works with hosted APIs and local servers such as Ollama or llama.cpp that implement `/v1/chat/completions`.
+This mode is intended for iterative generation with dense forward signals:
 
 ```lean
 propose
   (ai := true)
+  (modelMode := "interactive")
   (modelProvider := "openai-compatible")
   (modelEndpoint := "http://127.0.0.1:8080/v1/chat/completions")
   (modelName := "local-model")
-  (modelTimeoutMs := 2000)
-  (modelWeight := 0.65)
+  (modelMaxRounds := 4)
+  (modelMaxFeedbackEvents := 48)
 ```
 
-`modelProvider := "ollama"` is an alias for the same wire format. The default endpoint is `http://127.0.0.1:11434/v1/chat/completions`.
+Each round is strictly interleaved:
 
-For authenticated APIs, set an environment variable before invoking Lake or Lean:
+1. the model sees the current goal, available action IDs, and bounded previous `search_feedback`;
+2. it selects one listed action by ID or array index, without a score;
+3. ViaLean disables model queries for that branch and runs its normal multi-depth search;
+4. every attempted controller action records its search depth, target, family, result, and elapsed time;
+5. after failure, the next model round receives those discrete events and can revise its continuation.
 
-```powershell
-$env:VIALEAN_API_KEY = "..."
-lake test
-```
+A successful branch is validated and returned immediately. Unknown or repeated selections are ignored. Empty selections, malformed output, provider errors, and exhausted budgets return control to ViaLean's ordinary native ordering.
 
-```sh
-export VIALEAN_API_KEY='...'
-lake test
-```
-
-Change `modelApiKeyEnv` when a different variable name is required. ViaLean reads the secret at call time, rejects newline characters, places the authorization header in a temporary file, and never includes it in model traces or process arguments. The temporary file is removed automatically.
-
-The API transport invokes `curl` without a shell. Override `modelCurlCommand` if the executable has a different path.
-
-## Local command provider
-
-A command provider reads exactly one `vialean.guidance.v1` request from stdin and writes exactly one guidance response to stdout. The command is spawned directly, not through a shell.
-
-```lean
-propose
-  (ai := true)
-  (modelProvider := "command")
-  (modelCommand := "python")
-  (modelCommandArgsJson := "[\"examples/model_adapter.py\"]")
-```
-
-Arguments are a JSON array rather than a shell string, so paths and flags are passed without shell expansion. The process is terminated when its timeout expires. Diagnostic stderr is bounded before it can appear in an error trace.
-
-The adapter can call a local Transformers pipeline, llama.cpp binding, inference daemon, or any other runtime. `examples/model_adapter.py` implements the complete transport with only Python's standard library; replace its scoring function with local inference.
-
-## Protocol
-
-Request:
+Interactive request (`vialean.interactive.v1`):
 
 ```json
 {
-  "protocol": "vialean.guidance.v1",
+  "protocol": "vialean.interactive.v1",
   "request_id": "184467...",
-  "depth": 1,
+  "round": 1,
+  "depth": 0,
   "goal": {
-    "shape": "equality",
-    "target": "a = c",
-    "locals": ["h₁ : a = b", "h₂ : b = c"]
+    "shape": "proposition",
+    "target": "R",
+    "locals": ["h : P ∨ Q", "hp : P → R", "hq : Q → R"]
   },
   "actions": [
     {
       "id": "92731...",
-      "family": "equality_local",
-      "kind": "equality_mid",
-      "summary": "b",
-      "prior": 0.9
+      "family": "structural",
+      "kind": "structural",
+      "summary": "..."
+    }
+  ],
+  "search_feedback": [
+    {
+      "sequence": 0,
+      "depth": 2,
+      "goal": "R",
+      "action_id": "812...",
+      "family": "local_cut",
+      "action": "cut/local-hypothesis",
+      "outcome": "failed",
+      "elapsed_ms": 7
     }
   ]
 }
 ```
 
-Response:
+Interactive response:
+
+```json
+{
+  "continue": [{"id": "92731..."}],
+  "rationale": "the failed cut suggests expanding the disjunction"
+}
+```
+
+`{"index": 0}` is also accepted. Although the parser accepts an ordered array for provider compatibility, the controller attempts at most one new selection before returning fresh search feedback.
+
+## Policy mode: optional score mixing
+
+`modelMode := "policy"` is the default compatibility mode. For every unresolved node after the cheap native probe, ViaLean asks for a goal value and scores over existing action IDs. Scores are clamped to `[0, 1]`, mixed with local priors using `modelWeight`, and then executed through the same rollback and validation path.
+
+```lean
+propose
+  (ai := true)
+  (modelMode := "policy")
+  (modelProvider := "openai-compatible")
+  (modelEndpoint := "http://127.0.0.1:8080/v1/chat/completions")
+  (modelName := "local-model")
+  (modelWeight := 0.65)
+```
+
+Policy response (`vialean.guidance.v1`):
 
 ```json
 {
   "value": 0.82,
-  "actions": [
-    {"id": "92731...", "score": 0.96}
-  ],
-  "rationale": "the local midpoint splits the equality into two known steps"
+  "actions": [{"id": "92731...", "score": 0.96}],
+  "rationale": "prefer the local equality bridge"
 }
 ```
 
-`value`, `actions`, and `rationale` are optional. Duplicate IDs keep their highest score; invalid entries and IDs not present in the request have no effect. Markdown JSON fences and reasoning prefixes such as `<think>…</think>` are accepted for compatibility with chat models.
+Duplicate IDs keep their highest score. Invalid and unknown IDs have no effect.
+
+## Providers
+
+### Local command
+
+The command is spawned directly without a shell. It reads one request from stdin and writes one response to stdout.
+
+```lean
+propose
+  (ai := true)
+  (modelMode := "interactive")
+  (modelProvider := "command")
+  (modelCommand := "python")
+  (modelCommandArgsJson := "[\"examples/model_adapter.py\"]")
+```
+
+Arguments are a JSON array, so paths and flags are not shell-expanded. The process is terminated at its timeout, stdout is size-bounded, and diagnostic stderr is truncated. The included adapter dispatches on the `protocol` field and demonstrates both modes using only Python's standard library.
+
+### OpenAI-compatible API and local servers
+
+`modelProvider := "openai-compatible"`, `"openai"`, and `"ollama"` use `/v1/chat/completions`. This covers hosted APIs and local compatible servers such as Ollama and llama.cpp. Requests use `curl` without a shell.
+
+For authentication, set the environment variable named by `modelApiKeyEnv` (default `VIALEAN_API_KEY`). The secret is read at call time, rejected if it contains a newline, placed in a temporary curl config file, and never included in model traces or process arguments.
+
+### Replay
+
+`modelProvider := "replay"` parses `modelReplayResponse` directly. It is useful for deterministic protocol and proof-search tests.
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---:|---|
 | `ai` | `false` | Enable model queries. |
+| `modelMode` | `"policy"` | `policy` score mixing or non-scoring `interactive` feedback. |
 | `modelProvider` | `"none"` | `command`, `openai-compatible`, `ollama`, or `replay`. |
-| `modelTimeoutMs` | `1500` | Per-node model budget, capped by the global deadline. |
-| `modelWeight` | `0.65` | Mixture weight for returned action scores. |
-| `modelMaxSignals` | `16` | Maximum accepted action-score entries. |
-| `modelContextChars` | `12000` | Upper bound used while rendering request items. |
+| `modelTimeoutMs` | `1500` | Per-round provider budget, capped by the global deadline. |
+| `modelMaxRounds` | `4` | Maximum interactive rounds at one search node. |
+| `modelMaxFeedbackEvents` | `48` | Tail of discrete events included in an interactive request. |
+| `modelWeight` | `0.65` | Policy-only mixture weight for action scores. |
+| `modelMaxSignals` | `16` | Maximum accepted scores or continuation selections. |
+| `modelContextChars` | `12000` | Bound while rendering goal/action context. |
 | `modelTemperature` | `0.0` | API sampling temperature. |
 | `modelMaxTokens` | `512` | API response token limit. |
-| `modelMaxResponseChars` | `65536` | Maximum accepted provider stdout size. |
-| `modelApiKeyEnv` | `"VIALEAN_API_KEY"` | Environment variable containing an optional API key. |
-| `modelReplayResponse` | `""` | Fixed response for deterministic tests and trace replay. |
-
-`deterministic := true` keeps ViaLean's local ordering stable, but it cannot make an external model deterministic. Use temperature zero or `replay` when exact reproducibility matters.
+| `modelMaxResponseChars` | `65536` | Maximum provider stdout/API content size. |
+| `modelApiKeyEnv` | `"VIALEAN_API_KEY"` | Environment variable for an optional API key. |
+| `modelReplayResponse` | `""` | Fixed response for deterministic tests. |
 
 ## Privacy and trust
 
-When `ai` is false, no model process or HTTP request is made. When enabled, the pretty-printed goal, local declarations, and candidate summaries are disclosed to the configured provider. Do not enable a remote endpoint for proprietary theorem statements unless that disclosure is acceptable.
+When `ai` is false, no model process or HTTP request is made. When enabled, rendered goals, local declarations, actions, and (in interactive mode) search events are disclosed to the configured provider.
 
-Regardless of provider behavior, the model cannot bypass proof validation: only existing action IDs are scoreable, failed branches roll back, unresolved metavariables and `sorryAx` are rejected, and Lean's kernel checks the final expression.
+Provider behavior cannot bypass proof validation: only existing actions can execute, model-selected branches run with further model calls disabled, failed branches roll back, unresolved metavariables and `sorryAx` are rejected, and Lean's kernel checks the final expression.

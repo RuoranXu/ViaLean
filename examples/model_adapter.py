@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Minimal vialean.guidance.v1 command adapter.
+"""Minimal command adapter for both ViaLean model protocols.
 
-Replace score_actions() with a call to a local model runtime. The transport itself
-uses only Python's standard library and writes no diagnostics to stdout.
+Replace score_actions() / continue_search() with a local runtime or API call. The
+transport uses only Python's standard library and keeps stdout JSON-only.
 """
 
 import json
@@ -11,7 +11,7 @@ from typing import Any
 
 
 def score_actions(request: dict[str, Any]) -> dict[str, Any]:
-    """Deterministic fallback scorer; replace this body with local inference."""
+    """Deterministic policy fallback; replace with model inference."""
     family_bonus = {
         "structural": 0.90,
         "equality_local": 0.88,
@@ -27,15 +27,41 @@ def score_actions(request: dict[str, Any]) -> dict[str, Any]:
     return {
         "value": 0.5 if not scored else max(item["score"] for item in scored),
         "actions": scored,
-        "rationale": "example adapter; replace score_actions with local model inference",
+        "rationale": "example policy; replace score_actions with local inference",
     }
+
+
+def continue_search(request: dict[str, Any]) -> dict[str, Any]:
+    """Choose one untried action after reading discrete multi-depth feedback."""
+    failed = {
+        str(event.get("action_id"))
+        for event in request.get("search_feedback", [])
+        if event.get("outcome") == "failed"
+    }
+    actions = request.get("actions", [])
+    preferred = sorted(
+        enumerate(actions),
+        key=lambda pair: (pair[1].get("family") != "structural", pair[0]),
+    )
+    for index, action in preferred:
+        if str(action.get("id")) not in failed:
+            return {
+                "continue": [{"id": str(action["id"])}],
+                "rationale": "example continuation selected an action not failed in feedback",
+            }
+    return {"continue": [], "rationale": "all offered actions were already attempted"}
 
 
 def main() -> None:
     request = json.load(sys.stdin)
-    if request.get("protocol") != "vialean.guidance.v1":
+    protocol = request.get("protocol")
+    if protocol == "vialean.guidance.v1":
+        response = score_actions(request)
+    elif protocol == "vialean.interactive.v1":
+        response = continue_search(request)
+    else:
         raise ValueError("unsupported ViaLean protocol")
-    json.dump(score_actions(request), sys.stdout, separators=(",", ":"))
+    json.dump(response, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")
 
 
