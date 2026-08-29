@@ -1,0 +1,6 @@
+/.lake/
+/build/
+/.downloads/
+/.vialean-stats.json
+*.olean
+*.ilean
