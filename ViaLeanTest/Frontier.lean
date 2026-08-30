@@ -22,6 +22,16 @@ private def checkAtlas
     for perspective in expected do
       unless hasPerspective atlas perspective do
         throwError "missing frontier perspective: {perspective}; got {atlas.map (·.perspective)}"
+    if expected.contains "future-graph" then
+      let some futureProbe := atlas.find? fun probe => probe.perspective == "future-graph"
+        | throwError "future graph disappeared after perspective check"
+      unless futureProbe.future.size ≤ cfg.frontierFutureNodes do
+        throwError "future graph exceeded its node bound"
+      unless futureProbe.future.any fun view => view.depth ≥ 2 do
+        throwError "future graph did not expose a genuinely multi-step path"
+      for view in futureProbe.future do
+        unless view.depth ≤ cfg.frontierFutureDepth do
+          throwError "future graph exceeded its depth bound"
     if requireExecutable then
       unless atlas.any (·.executable) do
         throwError "frontier contains no executable probe"
@@ -31,7 +41,7 @@ private def checkAtlas
           throwError "frontier branch omitted its local context/turnstile: {branch}"
 
 elab "frontier_logic_guard" : tactic => do
-  checkAtlas (← getMainGoal) #["elimination", "backward", "forward"]
+  checkAtlas (← getMainGoal) #["future-graph", "elimination", "backward", "forward"]
 
 elab "frontier_equality_guard" : tactic => do
   checkAtlas (← getMainGoal) #["rewrite", "equality-graph"]

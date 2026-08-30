@@ -37,6 +37,7 @@ structure SearchFeedback where
   action    : String := ""
   outcome   : String
   elapsedMs : Nat
+  detail    : String := ""
 
 deriving Inhabited, Repr
 
@@ -64,6 +65,7 @@ deriving Inhabited, Repr
 
 structure ModelContinuation where
   selections : Array ModelSelection := #[]
+  leanCandidates : Array String := #[]
   rationale? : Option String := none
 
 deriving Inhabited, Repr
@@ -135,7 +137,13 @@ private def frontierToJson (probe : FrontierProbe) : Json := Json.mkObj [
   ("result", probe.result),
   ("executable", probe.executable),
   ("goals", toJson probe.goals),
-  ("facts", toJson probe.facts)
+  ("facts", toJson probe.facts),
+  ("future", Json.arr (probe.future.map fun view => Json.mkObj [
+    ("depth", view.depth),
+    ("path", view.path),
+    ("goal", view.goal),
+    ("signals", toJson view.signals)
+  ]))
 ]
 private def feedbackToJson (event : SearchFeedback) : Json := Json.mkObj [
   ("sequence", event.sequence),
@@ -145,7 +153,8 @@ private def feedbackToJson (event : SearchFeedback) : Json := Json.mkObj [
   ("family", event.family),
   ("action", event.action),
   ("outcome", event.outcome),
-  ("elapsed_ms", event.elapsedMs)
+  ("elapsed_ms", event.elapsedMs),
+  ("detail", event.detail)
 ]
 
 def interactionRequestToJson (request : InteractionRequest) : Json := Json.mkObj [
@@ -286,7 +295,10 @@ private def parseSelection (json : Json) : Except String ModelSelection := do
       return { actionId?, index?, probeId?, probeIndex? }
 
 private def looksLikeContinuation (json : Json) : Bool :=
-  (json.getObjVal? "continue").isOk
+  (json.getObjVal? "continue").isOk ||
+  (json.getObjVal? "lean").isOk ||
+  (json.getObjVal? "lean_code").isOk ||
+  (json.getObjVal? "lean_candidates").isOk
 
 private def firstContinuationJson? (text : String) : Option Json :=
   let rec loop : List Char → Option Json
@@ -302,7 +314,7 @@ private def firstContinuationJson? (text : String) : Option Json :=
         else loop rest
   loop text.toList
 
-/-- Parse an interactive continuation. No score or proof text is accepted. -/
+/-- Parse an interactive continuation containing Lean candidates and/or optional control choices. -/
 def parseContinuation (text : String) (maxSelections : Nat := 16) : Except String ModelContinuation := do
   let cleaned := stripCodeFence text
   let json ← match Json.parse cleaned with
@@ -311,7 +323,9 @@ def parseContinuation (text : String) (maxSelections : Nat := 16) : Except Strin
         match firstContinuationJson? cleaned with
         | some json => pure json
         | none => throw originalError
-  let choices ← (← json.getObjVal? "continue").getArr?
+  let choices := match json.getObjVal? "continue" with
+    | .ok choicesJson => choicesJson.getArr?.toOption.getD #[]
+    | .error _ => #[]
   let rationale? := match json.getObjVal? "rationale" with
     | .ok rationaleJson => rationaleJson.getStr?.toOption
     | .error _ => none
@@ -320,7 +334,27 @@ def parseContinuation (text : String) (maxSelections : Nat := 16) : Except Strin
     if selections.size ≥ maxSelections then break
     if let .ok selection := parseSelection choice then
       selections := selections.push selection
-  return { selections, rationale? }
+  let candidateCode? (candidate : Json) : Option String :=
+    match candidate.getStr? with
+    | .ok code => some code
+    | .error _ => match candidate.getObjVal? "code" with
+      | .ok codeJson => codeJson.getStr?.toOption
+      | .error _ => none
+  let mut leanCandidates := #[]
+  if let .ok leanJson := json.getObjVal? "lean" then
+    if let some code := candidateCode? leanJson then
+      unless code.trimAscii.isEmpty do leanCandidates := leanCandidates.push code
+  if leanCandidates.size < maxSelections then
+    if let .ok leanJson := json.getObjVal? "lean_code" then
+      if let some code := candidateCode? leanJson then
+        unless code.trimAscii.isEmpty do leanCandidates := leanCandidates.push code
+  if let .ok candidatesJson := json.getObjVal? "lean_candidates" then
+    if let .ok candidates := candidatesJson.getArr? then
+      for candidate in candidates do
+        if leanCandidates.size ≥ maxSelections then break
+        if let some code := candidateCode? candidate then
+          unless code.trimAscii.isEmpty do leanCandidates := leanCandidates.push code
+  return { selections, leanCandidates, rationale? }
 def parseArgs (text : String) : Except String (Array String) := do
   let json ← Json.parse text
   fromJson? json

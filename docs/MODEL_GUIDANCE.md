@@ -1,6 +1,6 @@
 # Model guidance
 
-ViaLean exposes two bounded, untrusted model modes. Both receive rendered Lean state and objects already constructed by ViaLean. Neither accepts proof terms, tactic programs, shell commands, or new executable payloads.
+ViaLean exposes two bounded, untrusted model modes. Policy mode only scores objects already constructed by ViaLean. Interactive mode can additionally propose validated core Lean `by ...`/tactic scripts; it never accepts declarations, commands, shell text, arbitrary metaprograms, or unchecked proofs.
 
 ## Interactive mode: diverse finite lookahead
 
@@ -16,9 +16,12 @@ propose
   (modelMaxRounds := 4)
   (frontierMaxProbes := 32)
   (frontierForwardDepth := 2)
+  (frontierFutureDepth := 3)
+  (frontierFutureWidth := 6)
+  (frontierFutureNodes := 24)
 ```
 
-For each unresolved node, ViaLean computes one frontier atlas and reuses it across rounds. Per-perspective quotas are merged round-robin, so repeated rewrites cannot crowd out elimination, construction, forward reasoning, or equality closure.
+For each unresolved node, ViaLean computes one frontier atlas and reuses it across rounds. Per-perspective quotas are merged round-robin, so repeated rewrites cannot crowd out elimination, construction, forward reasoning, equality closure, or the deep future view. The `future-graph` recursively mixes several operators at each node and records full local contexts plus qualitative signals. Its default depth/width/node bounds are 3/6/24.
 
 | Perspective | Finite symbolic lookahead | Executable |
 |---|---|---|
@@ -30,15 +33,16 @@ For each unresolved node, ViaLean computes one frontier atlas and reuses it acro
 | `backward` | one local apply layer and premises required | yes |
 | `forward` | typed local application closure up to a small depth | observation only |
 | `equality-graph` | kernel-typed two-edge transitive consequences | observation only |
+| `future-graph` | bounded multi-step intro/simp/apply/constructor/cases/rewrite paths | observation only |
 
 Each interactive round is strict:
 
-1. the model sees the goal, traditional actions, the complete bounded atlas, and previous search feedback;
-2. it selects one action (`id`/`index`) or executable probe (`probe_id`/`probe_index`), without returning a score;
-3. ViaLean disables model queries for the selected branch;
-4. an action runs normally, or a probe is replayed exactly on a fresh metavariable goal;
-5. generated subgoals are recursively searched under the shared deadline;
-6. success yields a validated proof; failure rolls back and emits depth/goal/action/outcome/timing events for the next round.
+1. the model sees the goal, traditional actions, the complete bounded atlas, multi-step future paths, and previous execution feedback;
+2. it returns up to `modelMaxCodeCandidates` Lean candidates and may optionally select actions/probes;
+3. each candidate is parsed as a `by` proof or tactic sequence, structurally validated, and run on a fresh goal under a separate heartbeat cap;
+4. if the candidate leaves goals, ViaLean disables nested model calls and recursively searches those obligations;
+5. a complete branch is finalized and checked; a failed branch restores metavariable state;
+6. the next model round sees parse/elaboration errors or remaining goals together with their own bounded future paths.
 
 Traditional actions may be empty: an executable frontier probe can independently drive the branch. Observation-only probes provide semantic guidance but are rejected if selected for execution.
 
@@ -77,7 +81,26 @@ Request (`vialean.interactive.v1`, abbreviated):
       "result": "derived",
       "executable": false,
       "goals": [],
-      "facts": ["step 1, hp ← ...", "step 2, ... ⟹ R"]
+      "facts": ["step 1, hp ← ...", "step 2, ... ⟹ R"],
+      "future": []
+    },
+    {
+      "id": "future-1",
+      "perspective": "future-graph",
+      "operation": "bounded-deep-symbolic-search",
+      "source": "multi-operator",
+      "result": "expanded",
+      "executable": false,
+      "goals": [],
+      "facts": [],
+      "future": [
+        {
+          "depth": 2,
+          "path": "root/apply:qr[0]/apply:pq[0]",
+          "goal": "p : P, pq : P → Q, qr : Q → R\n⊢ P",
+          "signals": ["exact local p closes this node"]
+        }
+      ]
     }
   ],
   "search_feedback": [
@@ -89,13 +112,28 @@ Request (`vialean.interactive.v1`, abbreviated):
       "family": "frontier/rewrite",
       "action": "rewrite-forward/hEq",
       "outcome": "failed",
-      "elapsed_ms": 7
+      "elapsed_ms": 7,
+      "detail": "remaining_goal[0]: R"
     }
   ]
 }
 ```
 
-The interactive wire format intentionally omits action priors and all score fields.
+The interactive wire format intentionally omits action priors and all score fields. Future paths are observations, not runnable handles.
+
+Return Lean candidates directly:
+
+```json
+{
+  "lean_candidates": [
+    {"code": "by intro h; exact h"},
+    {"code": "intro h"}
+  ],
+  "rationale": "the first closes directly; the second lets symbolic search continue"
+}
+```
+
+The `continue` field is optional. It remains useful as a fallback:
 
 Select by stable ID:
 
@@ -112,7 +150,7 @@ Or by request-local array index, useful for replay tests:
 {"continue": [{"probe_index": 0}]}
 ```
 
-The parser accepts an ordered array for provider compatibility, but the controller executes at most one new selection before returning fresh feedback. Unknown, repeated, non-executable, or out-of-range selections are ignored.
+The parser accepts `lean`, `lean_code`, and ordered `lean_candidates` forms. Repeated code, unknown IDs, non-executable probes, and out-of-range selections are ignored. Code candidates run before optional selections in each round.
 
 ## Policy mode
 
@@ -163,12 +201,19 @@ The optional key is read from the environment variable named by `modelApiKeyEnv`
 | `modelTimeoutMs` | `1500` | Per-round provider budget, capped by the global deadline. |
 | `modelMaxRounds` | `4` | Interactive rounds at one node. |
 | `modelMaxFeedbackEvents` | `48` | Feedback tail sent to the model. |
+| `modelLeanCode` | `true` | Accept validated core Lean tactic candidates in interactive mode. |
+| `modelMaxCodeCandidates` | `4` | Maximum code candidates executed per response. |
+| `modelMaxCodeChars` | `12000` | Per-candidate source bound. |
+| `modelCodeMaxHeartbeats` | `50000` | Fresh Lean heartbeat allowance per candidate. |
 | `frontier` | `true` | Enable the atlas in interactive mode. |
 | `frontierMaxProbes` | `32` | Global atlas bound. |
 | `frontierMaxPerPerspective` | `4` | Diversity quota per perspective. |
 | `frontierMaxChildren` | `6` | Branch fan-out/render/replay bound. |
 | `frontierMaxFacts` | `12` | Forward/equality fact bound. |
 | `frontierForwardDepth` | `2` | Typed local forward-composition depth. |
+| `frontierFutureDepth` | `3` | Maximum recursive future depth. |
+| `frontierFutureWidth` | `6` | Maximum successful transforms expanded per node. |
+| `frontierFutureNodes` | `24` | Hard total future-node bound. |
 | `frontierContextChars` | `16000` | Atlas rendering budget. |
 | `modelContextChars` | `12000` | Goal/action rendering budget. |
 | `modelMaxResponseChars` | `65536` | Provider response bound. |
@@ -178,4 +223,4 @@ The optional key is read from the environment variable named by `modelApiKeyEnv`
 
 When `ai` is false, no provider process or HTTP request is made. Interactive mode discloses rendered goals, locals, actions, atlas views, and feedback to the configured provider.
 
-The model cannot bypass validation: serialized probes contain no private replay handles, only ViaLean-created executable probes can replay, preview states are rolled back, nested model calls are disabled, unresolved metavariables and `sorryAx` are rejected, and Lean's kernel checks the final expression.
+The model cannot bypass validation. Model code must parse to a core `by`/tactic tree; syntax containing commands, `run_tac`, evaluation/native execution, `set_option`, macros, syntax quotations, or non-core tactic extensions is rejected before elaboration. Accepted tactics receive a fresh heartbeat budget and metavariable state. Serialized probes contain no private replay handles, nested model calls are disabled, unresolved metavariables and `sorryAx` are rejected, and Lean's kernel checks the final expression.

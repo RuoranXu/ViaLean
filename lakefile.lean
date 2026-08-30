@@ -3,7 +3,7 @@ import Lake
 open Lake DSL
 
 package ViaLean where
-  version := v!"0.4.1"
+  version := v!"0.5.0"
 
 @[default_target]
 lean_lib ViaLean where

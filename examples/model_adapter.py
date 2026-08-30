@@ -32,7 +32,7 @@ def score_actions(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def continue_search(request: dict[str, Any]) -> dict[str, Any]:
-    """Choose one untried executable probe or action after reading symbolic views and feedback."""
+    """Offer Lean code first, plus an optional symbolic fallback selected from feedback."""
     failed = {
         str(event.get("action_id"))
         for event in request.get("search_feedback", [])
@@ -42,8 +42,9 @@ def continue_search(request: dict[str, Any]) -> dict[str, Any]:
     for probe in frontier:
         if probe.get("executable") and str(probe.get("id")) not in failed:
             return {
+                "lean_candidates": [{"code": "by simp_all"}],
                 "continue": [{"probe_id": str(probe["id"])}],
-                "rationale": "selected a diverse executable symbolic counterfactual",
+                "rationale": "try concise Lean code, then use a diverse symbolic counterfactual",
             }
 
     actions = request.get("actions", [])
@@ -54,8 +55,9 @@ def continue_search(request: dict[str, Any]) -> dict[str, Any]:
     for index, action in preferred:
         if str(action.get("id")) not in failed:
             return {
+                "lean_candidates": [{"code": "by simp_all"}],
                 "continue": [{"id": str(action["id"])}],
-                "rationale": "selected an action not failed in search feedback",
+                "rationale": "try concise Lean code, then use an action not failed in feedback",
             }
     return {"continue": [], "rationale": "all executable probes and actions were attempted"}
 

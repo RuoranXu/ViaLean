@@ -37,6 +37,10 @@ structure ProposeConfig where
   modelWeight            : Float := 0.65
   modelMaxRounds          : Nat := 4
   modelMaxFeedbackEvents  : Nat := 48
+  modelLeanCode           : Bool := true
+  modelMaxCodeCandidates  : Nat := 4
+  modelMaxCodeChars       : Nat := 12000
+  modelCodeMaxHeartbeats  : Nat := 50000
   allowTypeCuts          : Bool := false
   ucb                     : Bool := true
   ucbExploration         : Float := 0.8
@@ -56,5 +60,8 @@ structure ProposeConfig where
   frontierMaxFacts        : Nat := 12
   frontierForwardDepth    : Nat := 2
   frontierContextChars    : Nat := 16000
+  frontierFutureDepth     : Nat := 3
+  frontierFutureWidth     : Nat := 6
+  frontierFutureNodes     : Nat := 24
 
 end ViaLean

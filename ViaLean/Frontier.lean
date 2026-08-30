@@ -3,6 +3,7 @@ import ViaLean.Goal
 import Lean.Meta.Tactic.Apply
 import Lean.Meta.Tactic.Cases
 import Lean.Meta.Tactic.Contradiction
+import Lean.Meta.Tactic.Intro
 import Lean.Meta.Tactic.Rewrite
 import Lean.Meta.Tactic.Simp.Main
 import Lean.Meta.Tactic.Simp.Attr
@@ -10,6 +11,14 @@ import Lean.Meta.Tactic.Simp.Attr
 open Lean Meta
 
 namespace ViaLean
+
+/-- One bounded node in the multi-step symbolic future visible to the model. -/
+structure SymbolicFutureView where
+  depth   : Nat
+  path    : String
+  goal    : String
+  signals : Array String := #[]
+deriving Inhabited, Repr
 
 /-- A bounded, non-scoring symbolic preview of one possible near-future view. -/
 structure FrontierProbe where
@@ -24,6 +33,7 @@ structure FrontierProbe where
   symm        : Bool := false
   goals       : Array String := #[]
   facts       : Array String := #[]
+  future      : Array SymbolicFutureView := #[]
 deriving Inhabited, Repr
 
 namespace FrontierEngine
@@ -94,6 +104,203 @@ private def constructorsFor (target : Expr) : MetaM (Array Name) := do
   match (← getEnv).find? name with
   | some (.inductInfo info) => return info.ctors.toArray
   | _ => return #[]
+
+private def futureKey (goal : MVarId) : MetaM UInt64 := goal.withContext do
+  let mut key := hash (← instantiateMVars (← goal.getType))
+  for decl in ← getLCtx do
+    unless decl.isImplementationDetail do
+      key := hash (key, hash (← instantiateMVars decl.type))
+  return key
+
+private def pushFutureSignal
+    (signals : Array String) (cfg : ProposeConfig) (signal : String) : Array String :=
+  if signals.size < cfg.frontierMaxFacts then signals.push signal else signals
+
+private def futureSignals
+    (goal : MVarId) (cfg : ProposeConfig) (chars : Nat) : MetaM (Array String) :=
+  goal.withContext do
+    let target ← instantiateMVars (← goal.getType)
+    let mut signals := #[]
+    if target.isForall then
+      signals := pushFutureSignal signals cfg "intro exposes a deeper local context"
+    if target.isEq || target.isHEq then
+      signals := pushFutureSignal signals cfg
+        "equality reasoning and bidirectional rewriting are available"
+    for ctor in ← constructorsFor target do
+      signals := pushFutureSignal signals cfg s!"constructor {ctor} exposes coupled obligations"
+    for decl in ← getLCtx do
+      unless decl.isImplementationDetail do
+        if signals.size < cfg.frontierMaxFacts then
+          let type ← instantiateMVars decl.type
+          let saved ← saveState
+          let closes ← try isDefEq type target catch _ => pure false
+          saved.restore
+          if closes then
+            signals := pushFutureSignal signals cfg s!"exact local {decl.userName} closes this node"
+          if type.isEq || type.isHEq then
+            signals := pushFutureSignal signals cfg s!"rewrite source {decl.userName}"
+          match ← whnf type with
+          | .forallE _ _ _ _ =>
+            signals := pushFutureSignal signals cfg s!"backward application candidate {decl.userName}"
+          | _ =>
+            if (← isProp type) && !type.isEq && !type.isHEq then
+              signals := pushFutureSignal signals cfg s!"elimination candidate {decl.userName}"
+    let reduced ← whnf target
+    unless reduced == target do
+      signals := pushFutureSignal signals cfg
+        s!"normalization changes target to {← renderExpr reduced chars}"
+    return signals
+
+private def observingFuture (action : MetaM (Array SymbolicFutureView)) : MetaM (Array SymbolicFutureView) := do
+  let saved ← saveState
+  try
+    let result ← action
+    saved.restore
+    return result
+  catch _ =>
+    saved.restore
+    return #[]
+
+mutual
+  private partial def exploreFutureChildren
+      (children : Array MVarId) (depth : Nat) (path operation : String)
+      (cfg : ProposeConfig) (chars : Nat) (budget? : Option Budget)
+      (count : IO.Ref Nat) (seen : Std.HashSet UInt64) : MetaM (Array SymbolicFutureView) := do
+    if children.isEmpty then
+      if (← count.get) ≥ cfg.frontierFutureNodes || !(← budgetOpen budget?) then return #[]
+      count.modify (· + 1)
+      let closed : SymbolicFutureView := {
+        depth := depth
+        path := path ++ "/" ++ operation
+        goal := "closed"
+        signals := #["symbolic transform closes this branch"]
+      }
+      return #[closed]
+    let mut result := #[]
+    for index in [0:children.size] do
+      if (← count.get) ≥ cfg.frontierFutureNodes || !(← budgetOpen budget?) then break
+      let child := children[index]!
+      unless ← child.isAssigned do
+        result := result ++ (← exploreFutureGoal child depth
+          s!"{path}/{operation}[{index}]" cfg chars budget? count seen)
+    return result
+
+  private partial def exploreFutureGoal
+      (goal : MVarId) (depth : Nat) (path : String)
+      (cfg : ProposeConfig) (chars : Nat) (budget? : Option Budget)
+      (count : IO.Ref Nat) (seen : Std.HashSet UInt64) : MetaM (Array SymbolicFutureView) := do
+    if depth > cfg.frontierFutureDepth || (← count.get) ≥ cfg.frontierFutureNodes ||
+        !(← budgetOpen budget?) || (← goal.isAssigned) then return #[]
+    goal.withContext do
+      let key ← futureKey goal
+      if seen.contains key then return #[]
+      let seen := seen.insert key
+      count.modify (· + 1)
+      let view : SymbolicFutureView := {
+        depth
+        path
+        goal := ← renderGoal goal chars
+        signals := ← futureSignals goal cfg chars
+      }
+      if depth = cfg.frontierFutureDepth then return #[view]
+      let target ← instantiateMVars (← goal.getType)
+      let mut result := #[view]
+      let mut expanded := 0
+
+      if expanded < cfg.frontierFutureWidth && target.isForall then
+        let branch ← observingFuture do
+          let clone ← freshGoal target
+          let (_, child) ← clone.intro1P
+          exploreFutureChildren #[child] (depth + 1) path "intro" cfg chars budget? count seen
+        unless branch.isEmpty do
+          expanded := expanded + 1
+          result := result ++ branch
+
+      if expanded < cfg.frontierFutureWidth then
+        let branch ← observingFuture do
+          let clone ← freshGoal target
+          let simpCtx ← Simp.Context.mkDefault
+          let (simpResult, _) ← simpTargetStar clone simpCtx
+          match simpResult with
+          | .closed => exploreFutureChildren #[] (depth + 1) path "simp" cfg chars budget? count seen
+          | .modified child => exploreFutureChildren #[child] (depth + 1) path "simp" cfg chars budget? count seen
+          | .noChange => return #[]
+        unless branch.isEmpty do
+          expanded := expanded + 1
+          result := result ++ branch
+
+      let mut locals : Array LocalDecl := #[]
+      for decl in ← getLCtx do
+        unless decl.isImplementationDetail do
+          locals := locals.push decl
+      for decl in locals do
+        if expanded ≥ cfg.frontierFutureWidth then break
+        let branch ← observingFuture do
+          let clone ← freshGoal target
+          let children ← clone.apply (mkFVar decl.fvarId)
+          if children.length > cfg.frontierMaxChildren then return #[]
+          exploreFutureChildren children.toArray (depth + 1) path
+            s!"apply:{decl.userName}" cfg chars budget? count seen
+        unless branch.isEmpty do
+          expanded := expanded + 1
+          result := result ++ branch
+
+      for ctor in ← constructorsFor target do
+        if expanded ≥ cfg.frontierFutureWidth then break
+        let branch ← observingFuture do
+          let clone ← freshGoal target
+          let children ← clone.apply (← mkConstWithFreshMVarLevels ctor)
+          if children.length > cfg.frontierMaxChildren then return #[]
+          exploreFutureChildren children.toArray (depth + 1) path
+            s!"constructor:{ctor}" cfg chars budget? count seen
+        unless branch.isEmpty do
+          expanded := expanded + 1
+          result := result ++ branch
+
+      for decl in locals do
+        if expanded ≥ cfg.frontierFutureWidth then break
+        let type ← instantiateMVars decl.type
+        if (← isProp type) && !type.isEq && !type.isHEq then
+          let branch ← observingFuture do
+            let clone ← freshGoal target
+            let branches ← clone.cases decl.fvarId
+            if branches.isEmpty || branches.size > cfg.frontierMaxChildren then return #[]
+            exploreFutureChildren (branches.map (·.mvarId)) (depth + 1) path
+              s!"cases:{decl.userName}" cfg chars budget? count seen
+          unless branch.isEmpty do
+            expanded := expanded + 1
+            result := result ++ branch
+
+      for decl in locals do
+        if expanded ≥ cfg.frontierFutureWidth then break
+        if decl.type.isEq then
+          for symm in #[false, true] do
+            if expanded ≥ cfg.frontierFutureWidth then break
+            let direction := if symm then "reverse" else "forward"
+            let branch ← observingFuture do
+              let clone ← freshGoal target
+              let rewriteResult ← clone.rewrite target (mkFVar decl.fvarId) (symm := symm)
+              let child ← clone.replaceTargetEq rewriteResult.eNew rewriteResult.eqProof
+              exploreFutureChildren (#[child] ++ rewriteResult.mvarIds) (depth + 1) path
+                s!"rewrite:{decl.userName}:{direction}"
+                cfg chars budget? count seen
+            unless branch.isEmpty do
+              expanded := expanded + 1
+              result := result ++ branch
+      return result
+
+end
+
+private def deepFutureProbe?
+    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (budget? : Option Budget) : MetaM (Option FrontierProbe) := do
+  if cfg.frontierFutureDepth = 0 || cfg.frontierFutureNodes = 0 then return none
+  let count ← IO.mkRef 0
+  let future ← observingFuture <| exploreFutureGoal snap.goalId 0 "root"
+    cfg chars budget? count {}
+  if future.isEmpty then return none
+  return some { (makeProbe "future-graph" "bounded-deep-symbolic-search"
+    "multi-operator" "expanded") with executable := false, future }
 
 private def normalizationProbes
     (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
@@ -312,8 +519,9 @@ def build (snap : GoalSnapshot) (cfg : ProposeConfig)
     let backward ← backwardProbes snap cfg chars budget?
     let forward := (← forwardProbe? snap cfg chars budget?).map (#[·]) |>.getD #[]
     let equality := (← equalityChainProbe? snap cfg chars budget?).map (#[·]) |>.getD #[]
+    let deepFuture := (← deepFutureProbe? snap cfg chars budget?).map (#[·]) |>.getD #[]
     let groups := #[normalization, contradiction, rewrites, elimination,
-      construction, backward, forward, equality]
+      construction, backward, forward, equality, deepFuture]
     let mut atlas := #[]
     for index in [0:cfg.frontierMaxPerPerspective] do
       unless ← budgetOpen budget? do break

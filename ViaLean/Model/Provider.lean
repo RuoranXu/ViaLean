@@ -14,12 +14,14 @@ private def systemPrompt : String :=
   "\"rationale\": short string}. Score useful next actions highly. Never invent action ids and do not return proof code."
 
 private def interactiveSystemPrompt : String :=
-  "You guide Lean proof search without scoring or writing proofs. The user JSON contains " ++
-  "kernel-checkable actions, a diverse bounded symbolic frontier, and search_feedback from model-disabled search. " ++
-  "Return JSON only: {\"continue\":[{\"id\":string}, {\"index\":number}, " ++
-  "{\"probe_id\":string}, or {\"probe_index\":number}],\"rationale\":short string}. " ++
-  "Use id/index for listed actions and probe_id/probe_index for executable frontier probes. " ++
-  "Never select a non-executable probe. Use feedback to revise the next choice."
+  "You are deeply coupled to Lean symbolic search. The user JSON contains the current goal, " ++
+  "a bounded multi-step symbolic future graph, optional controller actions, and feedback from actual execution. " ++
+  "Use the future graph as dense lookahead, not merely as a menu. Return JSON only with one or more " ++
+  "Lean candidates in \"lean_candidates\":[{\"code\":\"by ...\"}] and optionally " ++
+  "\"continue\":[{\"id\":string}, {\"index\":number}, {\"probe_id\":string}, or " ++
+  "{\"probe_index\":number}]. Complete `by` terms and partial tactic sequences are both useful. " ++
+  "Use ordinary core Lean proof tactics only. Do not use run_tac, eval/native tactics, set_option, macros, " ++
+  "declarations, imports, commands, non-core tactic extensions, or invented IDs. Revise code from execution feedback."
 private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : Json := Json.mkObj [
   ("model", cfg.modelName),
   ("temperature", toJson cfg.modelTemperature),

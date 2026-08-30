@@ -1,6 +1,6 @@
 import ViaLean
 
-open ViaLean
+open Lean Meta Elab Tactic ViaLean
 
 #guard
   match ModelProtocol.parseGuidance
@@ -64,6 +64,15 @@ example (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by
       continuation.selections[0]!.probeId? == some "probe-7" &&
       continuation.selections[1]!.probeIndex? == some 2
   | .error _ => false
+
+#guard
+  match ModelProtocol.parseContinuation
+      r#"{"lean_candidates":[{"code":"by intro h; exact h"},"constructor"],"rationale":"write Lean first"}"# with
+  | .ok continuation =>
+      continuation.selections.isEmpty &&
+      continuation.leanCandidates == #["by intro h; exact h", "constructor"]
+  | .error _ => false
+
 #guard
   let request : InteractionRequest := {
     requestId := "goal-1"
@@ -81,6 +90,12 @@ example (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by
       result := "branched"
       executable := true
       goals := #["P ⊢ R", "Q ⊢ R"]
+      future := #[{
+        depth := 2
+        path := "root/cases/apply"
+        goal := "p : P ⊢ R"
+        signals := #["exact local p closes this node"]
+      }]
     }]
     feedback := #[{
       sequence := 0
@@ -90,9 +105,15 @@ example (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by
       family := "structural"
       outcome := "failed"
       elapsedMs := 4
+      detail := "remaining_goal[0]: R"
     }]
   }
   let text := ModelProtocol.interactionRequestText request
+  let hasNewFields :=
+    text.contains r#""future""# &&
+    text.contains r#""path":"root/cases/apply""# &&
+    text.contains r#""detail":"remaining_goal[0]: R""#
+  hasNewFields &&
   text.contains "\"protocol\":\"vialean.interactive.v1\"" &&
   text.contains "\"search_feedback\"" && text.contains "\"depth\":3" &&
   text.contains "\"action\":\"\"" && text.contains "\"frontier\"" &&
@@ -108,3 +129,48 @@ example (P : Prop) : P → P := by
     (cuts := false)
     (library := false)
     (maxDepth := 3)
+
+elab "reject_unsafe_model_code" : tactic => do
+  match parseSafeModelTactic (← getEnv) "by run_tac IO.println \"unsafe\"" with
+  | .error _ => pure ()
+  | .ok _ => throwError "unsafe run_tac unexpectedly passed the model-code boundary"
+
+example : True := by
+  reject_unsafe_model_code
+  exact True.intro
+
+/-- A model can supply a complete Lean proof without selecting a controller action. -/
+example (P : Prop) : P → P := by
+  propose
+    (ai := true)
+    (modelMode := "interactive")
+    (modelProvider := "replay")
+    (modelReplayResponse := r#"{"lean_candidates":[{"code":"by intro h; exact h"}]}"#)
+    (directProbeSec := 0)
+    (structural := false)
+    (cuts := false)
+    (library := false)
+    (equalityBridge := false)
+    (iffBridge := false)
+    (witnesses := false)
+    (nativeTransforms := false)
+    (nativeCases := false)
+    (modelMaxRounds := 1)
+
+/-- A partial model tactic exposes obligations that symbolic search completes. -/
+example (P Q : Prop) (p : P) (q : Q) : P ∧ Q := by
+  propose
+    (ai := true)
+    (modelMode := "interactive")
+    (modelProvider := "replay")
+    (modelReplayResponse := r#"{"lean_candidates":[{"code":"constructor"}]}"#)
+    (directProbeSec := 0)
+    (structural := false)
+    (cuts := false)
+    (library := false)
+    (equalityBridge := false)
+    (iffBridge := false)
+    (witnesses := false)
+    (nativeTransforms := false)
+    (nativeCases := false)
+    (modelMaxRounds := 1)

@@ -9,6 +9,8 @@ import ViaLean.Proposers.Iff
 import ViaLean.Scheduler.UCB
 import ViaLean.Scheduler.PersistentStats
 import ViaLean.Model.Guidance
+import Lean.Elab.Tactic.Meta
+import Lean.Parser
 
 open Lean Meta
 
@@ -36,6 +38,87 @@ structure SearchState where
   path   : SearchPath := {}
   maxLeafSec? : Option Nat := none
   modelEnabled : Bool := true
+
+private structure ModelCodeAttempt where
+  proof?  : Option Expr := none
+  outcome : String := "failed"
+  detail  : String := ""
+
+private def boundedText (limit : Nat) (text : String) : String :=
+  if text.length ≤ limit then text else (text.take limit).toString ++ "…"
+
+private def forbiddenModelSyntaxKind (kind : Name) : Bool :=
+  let name := kind.toString.toLower
+  name.contains "runtac" ||
+  name.contains "run_tac" ||
+  name.contains "eval" ||
+  name.contains "native" ||
+  name.contains "setoption" ||
+  name.contains "set_option" ||
+  name.contains "sleep" ||
+  name.contains "command" ||
+  name.contains "syntaxquotation" ||
+  name.contains "macro"
+
+private def allowedModelSyntaxKind (kind : Name) : Bool :=
+  let name := kind.toString
+  kind.isAnonymous ||
+  name == "null" ||
+  name == "group" ||
+  name == "num" ||
+  name == "scientific" ||
+  name == "str" ||
+  name == "char" ||
+  name.startsWith "Lean.Parser.Tactic." ||
+  name.startsWith "Lean.Parser.Term."
+
+private partial def validateModelSyntax (stx : Syntax) : Except String Unit := do
+  match stx with
+  | .missing | .atom .. | .ident .. => pure ()
+  | .node _ kind args =>
+      if forbiddenModelSyntaxKind kind then
+        throw s!"unsafe Lean syntax is not permitted for model code: {kind}"
+      unless allowedModelSyntaxKind kind do
+        throw s!"unsupported non-core syntax in model code: {kind}"
+      for arg in args do validateModelSyntax arg
+
+/-- Parse external model text as a core Lean tactic sequence after rejecting executable
+metaprogramming, commands, resource-option overrides, and non-core syntax extensions. -/
+def parseSafeModelTactic (env : Environment) (code : String) : Except String Syntax := do
+  let wrapped := if code.startsWith "by" then code else "by\n  " ++ code
+  let term ← Parser.runParserCategory env `term wrapped
+  validateModelSyntax term
+  match term with
+  | .node _ kind args =>
+      unless kind.toString == "Lean.Parser.Term.byTactic" do
+        throw "model Lean code must be a by-proof or a tactic sequence"
+      let some tactics := args[1]? | throw "malformed by-proof"
+      return tactics
+  | _ => throw "model Lean code must be a by-proof or a tactic sequence"
+
+private def describeOpenGoals
+    (goals : Array MVarId) (state : SearchState) : MetaM String := do
+  let mut chunks : Array String := #[]
+  for index in [0:goals.size] do
+    if chunks.size ≥ state.config.frontierMaxChildren then break
+    let goal := goals[index]!
+    unless ← goal.isAssigned do
+      let snap ← snapshot goal
+      let atlas ← FrontierEngine.build snap state.config (some state.budget)
+      let rendered := (← ppExpr snap.target).pretty
+      chunks := chunks.push s!"remaining_goal[{index}]: {rendered}"
+      let mut futureCount := 0
+      for probe in atlas do
+        for view in probe.future do
+          if futureCount ≥ min 8 state.config.frontierFutureNodes then break
+          let signals := String.intercalate "; " view.signals.toList
+          chunks := chunks.push
+            s!"  future depth={view.depth} path={view.path}: {view.goal}\n    signals: {signals}"
+          futureCount := futureCount + 1
+        if futureCount ≥ min 8 state.config.frontierFutureNodes then break
+  if chunks.isEmpty then
+    return "candidate did not yield an assignable proof"
+  return boundedText state.config.modelContextChars <| String.intercalate "\n" chunks.toList
 
 /-- Restore the metavariable context after an exception or failed branch. -/
 def observingMeta? (action : MetaM (Option α)) : MetaM (Option α) := do
@@ -350,14 +433,71 @@ mutual
     unless ← solveFrontierChildren children state depth do return none
     let some proof ← getExprMVarAssignment? root | return none
     return some (← finalizeProof snap.target proof)
+
+  /-- Execute a validated model tactic on an isolated goal. Any open goals are handed
+  to the ordinary bounded solver; failures restore the complete metavariable state. -/
+  partial def tryModelLeanCandidate?
+      (snap : GoalSnapshot) (candidate : String)
+      (state : SearchState) (depth : Nat) : MetaM ModelCodeAttempt := snap.goalId.withContext do
+    let code := candidate.trimAscii.toString
+    if code.isEmpty then return { detail := "empty Lean candidate" }
+    if code.length > state.config.modelMaxCodeChars then
+      return { detail := s!"Lean candidate exceeds modelMaxCodeChars={state.config.modelMaxCodeChars}" }
+    if (← state.budget.remainingMs) = 0 then
+      return { detail := "global search deadline expired before candidate execution" }
+    let tacticSyntax ← match parseSafeModelTactic (← getEnv) code with
+      | .ok tacticSyntax => pure tacticSyntax
+      | .error error => return { detail := boundedText state.config.modelContextChars error }
+    let saved ← saveState
+    try
+      let root ← freshGoal snap.target
+      let heartbeatLimit := max 1 state.config.modelCodeMaxHeartbeats * 1000
+      let (remainingList, _) ←
+        withTheReader Core.Context (fun context => { context with maxHeartbeats := heartbeatLimit }) do
+          withCurrHeartbeats <| Elab.runTactic root tacticSyntax
+      let remaining := remainingList.toArray
+      if remaining.size > state.config.maxStructuralChildren then
+        let detail ← describeOpenGoals remaining state
+        saved.restore
+        return {
+          outcome := "expanded"
+          detail := boundedText state.config.modelContextChars
+            s!"candidate produced {remaining.size} goals, above maxStructuralChildren={state.config.maxStructuralChildren}\n{detail}"
+        }
+      let childState := { state with modelEnabled := false }
+      let completed ← solveFrontierChildren remaining childState depth
+      if completed then
+        if let some proof ← getExprMVarAssignment? root then
+          let proof ← finalizeProof snap.target proof
+          return {
+            proof? := some proof
+            outcome := "solved"
+            detail := if remaining.isEmpty then
+              "model tactic closed the goal and passed the final proof boundary"
+            else
+              s!"model tactic exposed {remaining.size} obligations; bounded symbolic search closed all of them"
+          }
+      let detail ← describeOpenGoals remaining state
+      saved.restore
+      return {
+        outcome := if remaining.isEmpty then "failed" else "expanded"
+        detail
+      }
+    catch ex =>
+      let errorText ← ex.toMessageData.toString
+      saved.restore
+      return {
+        detail := boundedText state.config.modelContextChars s!"tactic_error: {errorText}"
+      }
+
   partial def tryInteractive?
       (snap : GoalSnapshot) (actions : Array ProofAction)
       (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
     if state.config.modelMaxRounds = 0 then return none
     let frontier ← FrontierEngine.build snap state.config (some state.budget)
-    if actions.isEmpty && frontier.isEmpty then return none
     let mut attempted : Std.HashSet UInt64 := {}
     let mut attemptedProbes : Std.HashSet String := {}
+    let mut attemptedCodes : Std.HashSet String := {}
     for round in [0:state.config.modelMaxRounds] do
       if (← state.budget.remainingMs) = 0 then break
       let feedback ← feedbackWindow state
@@ -370,8 +510,36 @@ mutual
             break
       if state.config.trace then
         trace[ViaLean.model]
-          "interactive round={round}, frontier={frontier.size}, feedback={feedback.size}, selections={continuation.selections.size}"
+          "interactive round={round}, frontier={frontier.size}, feedback={feedback.size}, code={continuation.leanCandidates.size}, selections={continuation.selections.size}"
       let mut madeProgress := false
+      if state.config.modelLeanCode then
+        let candidateLimit := min continuation.leanCandidates.size
+          state.config.modelMaxCodeCandidates
+        for index in [0:candidateLimit] do
+          if (← state.budget.remainingMs) = 0 then break
+          let code := continuation.leanCandidates[index]!
+          let codeId : UInt64 := hash code
+          if attemptedCodes.contains code then continue
+          attemptedCodes := attemptedCodes.insert code
+          madeProgress := true
+          let started ← IO.monoMsNow
+          let attempt ← tryModelLeanCandidate? snap code state depth
+          let elapsedMs := (← IO.monoMsNow) - started
+          let events ← state.feedback.get
+          let rendered := (← ppExpr snap.target).pretty
+          let event : SearchFeedback := {
+            sequence := events.size
+            depth
+            goal := boundedText 512 rendered
+            actionId := s!"lean/{codeId}"
+            family := "model/lean-code"
+            action := boundedText 512 code
+            outcome := attempt.outcome
+            elapsedMs
+            detail := attempt.detail
+          }
+          state.feedback.set (events.push event)
+          if let some proof := attempt.proof? then return some proof
       for selection in continuation.selections do
         let action? := match selection.actionId? with
           | some id => actions.find? fun (action : ProofAction) => action.fingerprint == id
