@@ -7,6 +7,7 @@ import ViaLean.Proposers.Witness
 import ViaLean.Proposers.Library
 import ViaLean.Proposers.Iff
 import ViaLean.Scheduler.UCB
+import ViaLean.Scheduler.PersistentStats
 import ViaLean.Model.Guidance
 
 open Lean Meta
@@ -31,6 +32,7 @@ structure SearchState where
   scheduler : SchedulerState
   guidanceCache : IO.Ref (Std.HashMap UInt64 (Option ModelGuidance))
   feedback : IO.Ref (Array SearchFeedback)
+  stats : IO.Ref SolveStats
   path   : SearchPath := {}
   maxLeafSec? : Option Nat := none
   modelEnabled : Bool := true
@@ -57,6 +59,19 @@ private def availableSec (state : SearchState) (requested : Nat) : MetaM Nat := 
 private def hasSpeculativeBudget (state : SearchState) : MetaM Bool := do
   return (← state.budget.remainingSecFloor) > state.config.finalDirectMinSec
 
+private def noteDepth (state : SearchState) (depth : Nat) : MetaM Unit :=
+  state.stats.modify fun stats => { stats with bridgeDepth := max stats.bridgeDepth depth }
+
+private def noteAttempt (state : SearchState) (action : ProofAction) : MetaM Unit :=
+  state.stats.modify fun stats =>
+    match action.payload with
+    | .close _ => { stats with directAttempts := stats.directAttempts + 1 }
+    | .proposal _ => { stats with proposalAttempts := stats.proposalAttempts + 1 }
+    | _ => stats
+
+private def noteWinner (state : SearchState) (family : ProposalFamily) : MetaM Unit :=
+  state.stats.modify fun stats => { stats with winningFamily? := some family }
+
 private def directProof?
     (goal : MVarId) (state : SearchState) (requestedSec : Nat) : MetaM (Option Expr) := do
   let seconds ← availableSec state requestedSec
@@ -81,7 +96,6 @@ private def cheapClose? (snap : GoalSnapshot) : MetaM (Option Expr) := do
 private def orderActions
     (state : SearchState) (guidance? : Option ModelGuidance)
     (actions : Array ProofAction) : MetaM (Array ProofAction) := do
-  if guidance?.isNone && (state.config.deterministic || !state.config.ucb) then return actions
   let stats ← state.scheduler.snapshot
   let total := stats.fold (init := 0) fun total _ family => total + family.attempts
   let baseScore (action : ProofAction) :=
@@ -92,27 +106,39 @@ private def orderActions
         state.config.ucbExploration state.config.ucbPriorWeight
   let score (action : ProofAction) :=
     let base := baseScore action
-    let signal? := guidance?.bind fun guidance => ModelProtocol.ModelGuidance.score? guidance action.fingerprint
-    ModelProtocol.blendScore base signal? state.config.modelWeight
+    let actionSignal? := guidance?.bind fun guidance =>
+      ModelProtocol.ModelGuidance.score? guidance action.fingerprint
+    let signal? := match actionSignal? with
+      | some signal => some signal
+      | none => guidance?.map (·.value)
+    let blended := ModelProtocol.blendScore base signal? state.config.modelWeight
+    blended / max 0.1 action.estimatedCost
   return actions.insertionSort fun a b => score a > score b
 
 private def collectActions
     (snap : GoalSnapshot) (state : SearchState) : MetaM (Array ProofAction) := do
   let cfg := state.config
   let mut actions := #[]
+  if (← state.budget.remainingMs) = 0 then return actions
   if cfg.structural then
     actions := actions ++ (structuralProposals snap cfg).map Proposal.compile
+  if (← state.budget.remainingMs) = 0 then return actions
   if cfg.equalityBridge && snap.shape == .equality then
     actions := actions ++ (← equalityProposals snap cfg).map Proposal.compile
+  if (← state.budget.remainingMs) = 0 then return actions
   if cfg.iffBridge && snap.shape == .iff then
     actions := actions ++ (← iffProposals snap cfg).map Proposal.compile
+  if (← state.budget.remainingMs) = 0 then return actions
   if cfg.witnesses && snap.shape == .exists then
     actions := actions ++ (← witnessProposals snap cfg).map Proposal.compile
+  if (← state.budget.remainingMs) = 0 then return actions
   if cfg.cuts then
     actions := actions ++ (← localCutProposals snap cfg).map Proposal.compile
-  if cfg.library && cfg.cuts then
+  if (← state.budget.remainingMs) = 0 then return actions
+  if cfg.library then
     let premises ← libraryPremiseProvider.retrieve snap cfg.maxCandidates
-    actions := actions ++ (← libraryCutProposals snap cfg premises).map Proposal.compile
+    if (← state.budget.remainingMs) > 0 then
+      actions := actions ++ (← libraryCutProposals snap cfg premises).map Proposal.compile
   return actions
 
 private def modelMode (state : SearchState) : String :=
@@ -155,13 +181,16 @@ mutual
     goal.withContext do
       if depth > state.config.maxDepth then return none
       if (← state.budget.remainingMs) = 0 then return none
+      noteDepth state depth
       let snap ← snapshot goal
+      if (← state.budget.remainingMs) = 0 then return none
       if state.path.goalFingerprints.contains snap.fingerprint then return none
       let state := { state with
         path := { state.path with
           goalFingerprints := state.path.goalFingerprints.insert snap.fingerprint } }
 
       if let some proof ← cheapClose? snap then
+        if depth = 0 then noteWinner state .direct
         return some (← finalizeProof snap.target proof)
 
       -- A short direct probe is always a first-class action.
@@ -184,7 +213,11 @@ mutual
       -- Preserve a serious direct fallback under the same global deadline.
       let remaining ← state.budget.remainingSecFloor
       if remaining = 0 then return none
-      directProof? goal state remaining
+      noteAttempt state nativeCloseAction
+      let proof? ← directProof? goal state remaining
+      state.scheduler.record .direct (if proof?.isSome then 1.0 else 0.0)
+      if depth = 0 && proof?.isSome then noteWinner state .direct
+      return proof?
 
   partial def solveTarget?
       (target : Expr) (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
@@ -250,6 +283,14 @@ mutual
         let continuation ← mkLambdaFVars #[h] continuation
         return some (← composeAction snap.target (.cutApply cutType)
           #[cutProof, continuation])
+    | .libraryApply theoremName =>
+      if (← state.budget.remainingMs) = 0 then return none
+      let root ← freshGoal snap.target
+      let children ← root.apply (← mkConstWithFreshMVarLevels theoremName)
+      if children.length > state.config.maxStructuralChildren then return none
+      unless ← solveFrontierChildren children.toArray childState depth do return none
+      let some proof ← getExprMVarAssignment? root | return none
+      return some (← finalizeProof snap.target proof)
     | .witness witness =>
       let some (_, predicate) := existsTarget? snap.target | return none
       let childTarget := mkApp predicate witness
@@ -313,7 +354,7 @@ mutual
       (snap : GoalSnapshot) (actions : Array ProofAction)
       (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
     if state.config.modelMaxRounds = 0 then return none
-    let frontier ← FrontierEngine.build snap state.config
+    let frontier ← FrontierEngine.build snap state.config (some state.budget)
     if actions.isEmpty && frontier.isEmpty then return none
     let mut attempted : Std.HashSet UInt64 := {}
     let mut attemptedProbes : Std.HashSet String := {}
@@ -374,9 +415,13 @@ mutual
         if let some proof := proof? then return some proof
         break
       if !madeProgress then break
-    return none  partial def tryProofAction?
+    return none
+
+  partial def tryProofAction?
       (snap : GoalSnapshot) (action : ProofAction)
       (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
+    if (← state.budget.remainingMs) = 0 then return none
+    noteAttempt state action
     let started ← IO.monoMsNow
     let result ← match action.payload with
       | .close .native => directProof? snap.goalId state state.config.directProbeSec
@@ -386,6 +431,7 @@ mutual
       | .sketch _ => pure none
     let elapsedMs := (← IO.monoMsNow) - started
     state.scheduler.record action.family (if result.isSome then 1.0 else 0.0)
+    if depth = 0 && result.isSome then noteWinner state action.family
     if modelMode state == "interactive" then
       let events ← state.feedback.get
       let rendered := (← ppExpr snap.target).pretty
@@ -405,46 +451,122 @@ mutual
 
 end
 
+private def createScheduler (config : ProposeConfig) (budget : Budget) : MetaM SchedulerState := do
+  let scheduler ← SchedulerState.create
+  if !config.persistentStatsPath.isEmpty && (← budget.remainingMs) > 0 then
+    try
+      let persisted ← loadPersistentStats (System.FilePath.mk config.persistentStatsPath)
+      if (← budget.remainingMs) > 0 then persisted.seedScheduler scheduler
+    catch _ => pure ()
+  return scheduler
+
+private def persistScheduler
+    (config : ProposeConfig) (budget : Budget) (scheduler : SchedulerState) : MetaM Unit := do
+  if !config.persistentStatsPath.isEmpty && (← budget.remainingMs) > 0 then
+    try
+      savePersistentStats (System.FilePath.mk config.persistentStatsPath)
+        (← scheduler.toPersistentStats)
+    catch _ => pure ()
+
+private partial def monitorBudgetCancellation
+    (budget : Budget) (token : IO.CancelToken) (parent? : Option IO.CancelToken)
+    (finished : IO.Ref Bool) : IO Unit := do
+  if ← finished.get then return
+  if let some parent := parent? then
+    if ← parent.isSet then
+      token.set
+      return
+  let remaining ← budget.remainingMs
+  if remaining = 0 then
+    token.set
+  else
+    IO.sleep (UInt32.ofNat (min 10 remaining))
+    monitorBudgetCancellation budget token parent? finished
+
+private def withinBudget? (budget : Budget) (action : MetaM α) : MetaM (Option α) := do
+  let parentCancel? := (← readThe Core.Context).cancelTk?
+  let localCancel ← IO.CancelToken.new
+  let finished ← IO.mkRef false
+  let _monitor ← IO.asTask
+    (monitorBudgetCancellation budget localCancel parentCancel? finished) .dedicated
+  let attempt ← try
+    let result ← withTheReader Core.Context (fun context =>
+      { context with cancelTk? := some localCancel }) action
+    pure (Except.ok result : Except Exception α)
+  catch error => pure (Except.error error : Except Exception α)
+  finished.set true
+  match attempt with
+  | Except.ok result =>
+      if let some parent := parentCancel? then
+        if ← parent.isSet then throwInterruptException
+      if (← localCancel.isSet) || (← budget.remainingMs) = 0 then return none
+      return some result
+  | Except.error error =>
+      if let some parent := parentCancel? then
+        if ← parent.isSet then throw error
+      if ← localCancel.isSet then return none
+      throw error
+
 def runSearch (goal : MVarId) (config : ProposeConfig) : MetaM SolveResult := do
   let start ← IO.monoMsNow
   let budget ← Budget.start config.timeoutSec
-  let scheduler ← SchedulerState.create
+  let scheduler ← createScheduler config budget
   let guidanceCache ← IO.mkRef {}
   let feedback ← IO.mkRef #[]
-  let proof? ← solveGoal? goal { config, budget, scheduler, guidanceCache, feedback } 0
+  let statsRef ← IO.mkRef ({} : SolveStats)
+  let proof?? ← withinBudget? budget do
+    let proof? ← solveGoal? goal
+      { config, budget, scheduler, guidanceCache, feedback, stats := statsRef } 0
+    match proof? with
+    | some proof => return some (← finalizeProof (← goal.getType) proof)
+    | none => return none
+  let proof? := proof??.join
   let elapsed := (← IO.monoMsNow) - start
+  statsRef.modify fun stats => { stats with elapsedMs := elapsed }
+  persistScheduler config budget scheduler
+  let stats ← statsRef.get
   match proof? with
-  | some proof =>
-      let proof ← finalizeProof (← goal.getType) proof
-      return .solved proof { elapsedMs := elapsed }
-  | none => return .failed { elapsedMs := elapsed }
+  | some proof => return SolveResult.solved proof stats
+  | none => return SolveResult.failed stats
 
 def runManualProposal
     (goal : MVarId) (config : ProposeConfig) (proposal : Proposal) : MetaM (Option Expr) :=
   goal.withContext do
     let budget ← Budget.start config.timeoutSec
-    let scheduler ← SchedulerState.create
+    let scheduler ← createScheduler config budget
     let guidanceCache ← IO.mkRef {}
     let feedback ← IO.mkRef #[]
-    let snap ← snapshot goal
-    tryProofAction? snap proposal.compile { config, budget, scheduler, guidanceCache, feedback } 0
+    let stats ← IO.mkRef ({} : SolveStats)
+    let proof?? ← withinBudget? budget do
+      let snap ← snapshot goal
+      tryProofAction? snap proposal.compile
+        { config, budget, scheduler, guidanceCache, feedback, stats } 0
+    persistScheduler config budget scheduler
+    return proof??.join
 
 def diagnose (goal : MVarId) (config : ProposeConfig) : MetaM MessageData := goal.withContext do
-  let snap ← snapshot goal
-  let equalities ← if config.equalityBridge then equalityProposals snap config else pure #[]
-  let witnesses ← if config.witnesses then witnessProposals snap config else pure #[]
-  let cuts ← if config.cuts then localCutProposals snap config else pure #[]
-  let frontier ← if config.frontier then FrontierEngine.build snap config else pure #[]
-  let perspectives := String.intercalate "," <|
-    (frontier.map (·.perspective)).toList.eraseDups
-  let direct ← if config.directProbeSec = 0 then pure none else do
-    let budget ← Budget.start config.directProbeSec
-    let scheduler ← SchedulerState.create
-    let guidanceCache ← IO.mkRef {}
-    let feedback ← IO.mkRef #[]
-    directProof? goal { config, budget, scheduler, guidanceCache, feedback } config.directProbeSec
-  return m!"ViaLean: shape={repr snap.shape}, direct={direct.isSome}, " ++
-    m!"equality={equalities.size}, witness={witnesses.size}, cuts={cuts.size}, " ++
-    m!"frontier={frontier.size} [{perspectives}]"
+  let budget ← Budget.start config.timeoutSec
+  let report? ← withinBudget? budget do
+    let snap ← snapshot goal
+    let equalities ← if config.equalityBridge && (← budget.remainingMs) > 0 then
+      equalityProposals snap config else pure #[]
+    let witnesses ← if config.witnesses && (← budget.remainingMs) > 0 then
+      witnessProposals snap config else pure #[]
+    let cuts ← if config.cuts && (← budget.remainingMs) > 0 then
+      localCutProposals snap config else pure #[]
+    let frontier ← if config.frontier then
+      FrontierEngine.build snap config (some budget) else pure #[]
+    let perspectives := String.intercalate "," <|
+      (frontier.map (·.perspective)).toList.eraseDups
+    let direct ← if config.directProbeSec = 0 || (← budget.remainingMs) = 0 then pure none else do
+      let scheduler ← SchedulerState.create
+      let guidanceCache ← IO.mkRef {}
+      let feedback ← IO.mkRef #[]
+      let stats ← IO.mkRef ({} : SolveStats)
+      directProof? goal { config, budget, scheduler, guidanceCache, feedback, stats } config.directProbeSec
+    return m!"ViaLean: shape={repr snap.shape}, direct={direct.isSome}, " ++
+      m!"equality={equalities.size}, witness={witnesses.size}, cuts={cuts.size}, " ++
+      m!"frontier={frontier.size} [{perspectives}]"
+  return report?.getD m!"ViaLean: diagnostics exhausted the {config.timeoutSec}s deadline"
 
 end ViaLean

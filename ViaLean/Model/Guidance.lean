@@ -54,6 +54,7 @@ private def actionKindAndSummary (action : ProofAction) : MetaM (String × Strin
   | .proposal proposal =>
       let summary ← match proposal.payload with
         | .cutType type => pp type
+        | .libraryApply theoremName => pure (toString theoremName)
         | .equalityMid mid => pp mid
         | .iffMid mid => pp mid
         | .witness value => pp value
@@ -96,10 +97,10 @@ def query?
     (snap : GoalSnapshot) (actions : Array ProofAction) (depth : Nat)
     (cfg : ProposeConfig) (budget : Budget) : MetaM (Except String ModelGuidance) := do
   if !cfg.ai then return .error "model guidance is disabled"
-  let remaining ← budget.remainingMs
-  let timeoutMs := min remaining cfg.modelTimeoutMs
-  if timeoutMs = 0 then return .error "model guidance has no remaining budget"
+  if (← budget.remainingMs) = 0 then return .error "model guidance has no remaining budget"
   let request ← buildRequest snap actions depth cfg.modelContextChars
+  let timeoutMs := min (← budget.remainingMs) cfg.modelTimeoutMs
+  if timeoutMs = 0 then return .error "model guidance request construction exhausted the budget"
   ModelProvider.query cfg request timeoutMs
 
 /-- Build a bounded interactive request with discrete search feedback and counterfactual views. -/
@@ -127,10 +128,10 @@ def queryInteraction?
     (cfg : ProposeConfig) (budget : Budget) :
     MetaM (Except String ModelContinuation) := do
   if !cfg.ai then return .error "interactive model guidance is disabled"
-  let remaining ← budget.remainingMs
-  let timeoutMs := min remaining cfg.modelTimeoutMs
-  if timeoutMs = 0 then return .error "interactive model guidance has no remaining budget"
+  if (← budget.remainingMs) = 0 then return .error "interactive model guidance has no remaining budget"
   let request ← buildInteractionRequest snap actions depth round feedback frontier cfg.modelContextChars
+  let timeoutMs := min (← budget.remainingMs) cfg.modelTimeoutMs
+  if timeoutMs = 0 then return .error "interactive request construction exhausted the budget"
   ModelProvider.queryInteraction cfg request timeoutMs
 end ModelGuidanceEngine
 end ViaLean

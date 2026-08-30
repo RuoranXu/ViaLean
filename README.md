@@ -9,10 +9,10 @@ The default search path is offline and has no external theorem prover, native ex
 The project-owned pipeline provides:
 
 1. bounded goal snapshots, fingerprints, budgets, and AND/OR branch control;
-2. structural, equality, equivalence, witness, local-cut, and retrieved-premise actions;
+2. structural, equality, equivalence, witness, local-cut, and theorem-name-preserving retrieved-premise application;
 3. native contradiction closing, simplification, rewriting, case analysis, introductions, constructors, and premise application;
 4. a finite symbolic frontier containing heterogeneous near-future counterfactuals rather than many long rollouts;
-5. optional stable ordering or UCB scheduling and final proof validation.
+5. cost-aware stable/UCB scheduling, optional aggregate scheduler persistence, populated solve statistics, and final proof validation.
 
 ## Symbolic frontier atlas
 
@@ -27,7 +27,7 @@ In interactive mode, ViaLean computes the atlas once per unresolved node and reu
 - bounded typed forward chaining;
 - two-edge equality closure.
 
-Each probe exposes rendered goals or derived facts, never a scalar progress score. Executable probes can be selected by `probe_id` or `probe_index`. ViaLean replays the selected transform on a fresh goal, disables nested model calls, recursively solves only the exposed obligations, and either extracts a kernel-checkable proof or rolls the whole branch back. Observation-only forward closures remain guidance and cannot pretend to be proof steps.
+Each probe exposes rendered goals or derived facts, never a scalar progress score. Every branch rendering keeps its target and bounded newest-first local context. Executable probes can be selected by `probe_id` or `probe_index`. ViaLean replays the selected transform on a fresh goal, disables nested model calls, recursively solves only the exposed obligations, and either extracts a kernel-checkable proof or rolls the whole branch back. Observation-only forward closures remain guidance and cannot pretend to be proof steps.
 
 The atlas is bounded by global probe count, per-perspective quota, children per probe, facts, forward depth, rendered characters, and the shared proof-search deadline. This concentrates diverse information in a few forward steps instead of spending the budget on many rollouts.
 
@@ -38,7 +38,7 @@ ViaLean supports local command adapters, OpenAI-compatible APIs, Ollama/llama.cp
 - `modelMode := "policy"` asks for value/action scores and mixes them with ViaLean's priors.
 - `modelMode := "interactive"` accepts no score. Each round selects an existing action or executable frontier probe; non-model recursive search then returns bounded depth/goal/action/outcome/timing events before the next model round.
 
-Models never submit proof terms or executable tactic text. Unknown IDs, malformed JSON, process/API failure, timeout, and missing credentials safely fall back to native search.
+Models never submit proof terms or executable tactic text. Provider output is bounded while it is streamed, and over-limit processes are terminated. Unknown IDs, malformed JSON, process/API failure, timeout, and missing credentials safely fall back to native search.
 
 See [Model guidance](docs/MODEL_GUIDANCE.md) for both protocols, or [model_adapter.py](examples/model_adapter.py) for a zero-dependency adapter.
 
@@ -53,7 +53,7 @@ propose via_cut proposition
 propose via_witness term
 ```
 
-Core frontier fields are `frontier`, `frontierMaxProbes`, `frontierMaxPerPerspective`, `frontierMaxChildren`, `frontierMaxFacts`, `frontierForwardDepth`, and `frontierContextChars`. Native and controller bounds include `timeoutSec`, `maxDepth`, `nativeMaxDepth`, `nativeMaxApplications`, and `nativeMaxCaseBranches`.
+Core frontier fields are `frontier`, `frontierMaxProbes`, `frontierMaxPerPerspective`, `frontierMaxChildren`, `frontierMaxFacts`, `frontierForwardDepth`, and `frontierContextChars`. Native and controller bounds include `timeoutSec`, `maxDepth`, `nativeMaxDepth`, `nativeMaxApplications`, and `nativeMaxCaseBranches`. `persistentStatsPath` is empty by default; setting it opts into loading and saving aggregate family counters for UCB scheduling.
 
 ## Build and test
 

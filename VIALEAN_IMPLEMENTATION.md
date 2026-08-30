@@ -8,7 +8,7 @@ The engine is deliberately bounded. It searches a small, semantically varied nea
 
 ## Search model
 
-A node owns a goal, global deadline, depth, path fingerprints, discrete feedback storage, and a guidance cache. The controller performs a cheap close, collects proof actions, and—only in interactive mode—constructs one diversity-balanced frontier atlas for all model rounds at that node.
+A node owns a goal, global deadline, depth, path fingerprints, discrete feedback storage, populated solve counters, and a guidance cache. The controller performs a cheap close, collects proof actions, and—only in interactive mode—constructs one diversity-balanced frontier atlas for all model rounds at that node. Retrieved library candidates retain their declaration names and replay by applying that exact theorem before recursively solving its generated obligations.
 
 The atlas separates symbolic perspectives so one prolific family cannot dominate:
 
@@ -21,7 +21,7 @@ The atlas separates symbolic perspectives so one prolific family cannot dominate
 - typed local forward closure up to `frontierForwardDepth`;
 - kernel-typed two-edge equality transitivity.
 
-Preview tactics run under saved metavariable states and retain rendered strings only. Executable probes also retain private stable replay handles (`FVarId` or constructor name), which are never serialized. When selected, the controller creates a fresh goal, replays exactly that operation, disables nested model queries, recursively solves the generated metavariables, and extracts the completed root assignment. Failure restores the complete branch while IO feedback remains available for the next model round.
+Preview tactics run under saved metavariable states and retain rendered strings only. Branch strings preserve the target plus bounded newest-first local declarations introduced by elimination and simplification. Executable probes also retain private stable replay handles (`FVarId` or constructor name), which are never serialized. When selected, the controller creates a fresh goal, replays exactly that operation, disables nested model queries, recursively solves the generated metavariables, and extracts the completed root assignment. Failure restores the complete branch while IO feedback remains available for the next model round.
 
 The native solver independently supports exact hypotheses, reflexivity, `True`, contradiction, simplification/rewrite normalization, dependent introductions, constructors, bounded propositional cases, local/global premise application, and recursive subgoal solving.
 
@@ -36,6 +36,8 @@ The native solver independently supports exact hypotheses, reflexivity, `True`, 
 - `modelMaxRounds` and `modelMaxFeedbackEvents`: interaction bounds.
 - `nativeMaxDepth`, `nativeMaxApplications`, and the shared deadline: recursive execution bounds.
 
+The shared deadline is checked in controller and frontier loops, recomputed after request rendering, passed to native/model processes, and installed as a Lean Core cancellation token so cooperative expensive meta operations terminate when the wall-clock budget expires.
+
 ## Modules
 
 - `ViaLean/Config.lean`: search, frontier, and provider configuration.
@@ -44,10 +46,10 @@ The native solver independently supports exact hypotheses, reflexivity, `True`, 
 - `ViaLean/Frontier.lean`: bounded multi-perspective previews and private replay handles.
 - `ViaLean/NativeSolver.lean`: independent bounded leaf solver.
 - `ViaLean/Model/Protocol.lean`: policy/interactive JSON, frontier views, and selection parsing.
-- `ViaLean/Model/Process.lean`: shell-free process execution and timeout termination.
+- `ViaLean/Model/Process.lean`: shell-free process execution, streaming output bounds, and timeout termination.
 - `ViaLean/Model/Provider.lean`: command, replay, and OpenAI-compatible transports.
 - `ViaLean/Model/Guidance.lean`: bounded request rendering.
-- `ViaLean/Search.lean`: AND/OR control, probe replay, model isolation, feedback, and rollback.
+- `ViaLean/Search.lean`: AND/OR control, theorem/probe replay, deadline cancellation, statistics, model isolation, feedback, and rollback.
 - `ViaLean/Compose.lean`, `Validate.lean`: proof construction and trust boundary.
 - `ViaLean/Tactic.lean`: `propose` and `propose?`.
 - `ViaLeanTest/`: regression, frontier diversity, protocol, replay, and safety tests.

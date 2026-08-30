@@ -116,7 +116,7 @@ The parser accepts an ordered array for provider compatibility, but the controll
 
 ## Policy mode
 
-`modelMode := "policy"` remains the compatibility mode. It asks for a goal value and scores only over existing action IDs, clamps scores to `[0, 1]`, mixes them with local priors using `modelWeight`, and executes the reordered actions through normal rollback and validation.
+`modelMode := "policy"` remains the compatibility mode. It asks for a goal value and scores only over existing action IDs, clamps scores to `[0, 1]`, uses the goal value as the fallback signal for unscored actions, mixes signals with local priors using `modelWeight`, normalizes by estimated action cost, and executes the reordered actions through normal rollback and validation.
 
 ```json
 {
@@ -141,7 +141,7 @@ propose
   (modelCommandArgsJson := "[\"examples/model_adapter.py\"]")
 ```
 
-The process is spawned directly without a shell, reads one JSON request from stdin, and writes one JSON response to stdout. Arguments are a JSON array, stdout is bounded, and the process is killed on timeout. The included adapter supports both protocols and prefers an unfailed executable frontier probe before traditional actions.
+The process is spawned directly without a shell, reads one JSON request from stdin, and writes one JSON response to stdout. Arguments are a JSON array. Stdout is checked incrementally under a hard UTF-8 memory bound, stderr retains only a bounded prefix, and the process is terminated immediately on response overflow or timeout. The included adapter supports both protocols and prefers an unfailed executable frontier probe before traditional actions.
 
 ### OpenAI-compatible API
 

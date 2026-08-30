@@ -41,6 +41,7 @@ structure ProposeConfig where
   ucb                     : Bool := true
   ucbExploration         : Float := 0.8
   ucbPriorWeight         : Float := 0.25
+  persistentStatsPath    : String := ""
   trace                   : Bool := false
   deterministic          : Bool := true
   nativeMaxDepth         : Nat := 8

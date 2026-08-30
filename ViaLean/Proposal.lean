@@ -14,6 +14,7 @@ deriving BEq, Hashable, Repr, Inhabited
 
 inductive ProposalPayload
   | cutType (type : Expr)
+  | libraryApply (theoremName : Name)
   | equalityMid (mid : Expr)
   | iffMid (mid : Expr)
   | witness (value : Expr)

@@ -16,8 +16,10 @@ private def systemPrompt : String :=
 private def interactiveSystemPrompt : String :=
   "You guide Lean proof search without scoring or writing proofs. The user JSON contains " ++
   "kernel-checkable actions, a diverse bounded symbolic frontier, and search_feedback from model-disabled search. " ++
-  "Return JSON only: {\"continue\":[{\"id\":string} or {\"index\":number}]," ++
-  "\"rationale\":short string}. Choose only listed actions. Use feedback to revise the next choice."
+  "Return JSON only: {\"continue\":[{\"id\":string}, {\"index\":number}, " ++
+  "{\"probe_id\":string}, or {\"probe_index\":number}],\"rationale\":short string}. " ++
+  "Use id/index for listed actions and probe_id/probe_index for executable frontier probes. " ++
+  "Never select a non-executable probe. Use feedback to revise the next choice."
 private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : Json := Json.mkObj [
   ("model", cfg.modelName),
   ("temperature", toJson cfg.modelTemperature),

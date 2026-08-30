@@ -25,6 +25,10 @@ private def checkAtlas
     if requireExecutable then
       unless atlas.any (·.executable) do
         throwError "frontier contains no executable probe"
+    for probe in atlas do
+      for branch in probe.goals do
+        unless branch.contains "⊢" && branch.contains ":" do
+          throwError "frontier branch omitted its local context/turnstile: {branch}"
 
 elab "frontier_logic_guard" : tactic => do
   checkAtlas (← getMainGoal) #["elimination", "backward", "forward"]

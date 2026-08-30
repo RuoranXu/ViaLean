@@ -35,7 +35,17 @@ private def renderExpr (expr : Expr) (limit : Nat) : MetaM String := do
   return bounded limit (← ppExpr (← instantiateMVars expr)).pretty
 
 private def renderGoal (goal : MVarId) (limit : Nat) : MetaM String :=
-  goal.withContext do renderExpr (← goal.getType) limit
+  goal.withContext do
+    let mut lines : Array String := #[]
+    for decl in ← getLCtx do
+      unless decl.isImplementationDetail do
+        lines := lines.push s!"{decl.userName} : {← renderExpr decl.type limit}"
+    let target := bounded (max 16 (limit / 2)) (← renderExpr (← goal.getType) limit)
+    let header := s!"⊢ {target}"
+    let contextLimit := limit - min limit (header.length + 1)
+    let context := bounded contextLimit (String.intercalate "\n" lines.reverse.toList)
+    return if context.isEmpty then bounded limit header
+      else bounded limit (header ++ "\n" ++ context)
 
 private def renderGoals
     (goals : Array MVarId) (maxChildren chars : Nat) : MetaM (Array String) := do
@@ -57,13 +67,20 @@ private def makeProbe
   facts
 }
 
+private def budgetOpen (budget? : Option Budget) : MetaM Bool :=
+  match budget? with
+  | none => pure true
+  | some budget => return (← budget.remainingMs) > 0
+
 /-- Execute a preview under full metavariable rollback and retain rendered data only. -/
-private def observingProbe? (action : MetaM (Option FrontierProbe)) : MetaM (Option FrontierProbe) := do
+private def observingProbe? (budget? : Option Budget)
+    (action : MetaM (Option FrontierProbe)) : MetaM (Option FrontierProbe) := do
+  unless ← budgetOpen budget? do return none
   let saved ← saveState
   try
     let result ← action
     saved.restore
-    return result
+    if ← budgetOpen budget? then return result else return none
   catch _ =>
     saved.restore
     return none
@@ -79,14 +96,16 @@ private def constructorsFor (target : Expr) : MetaM (Array Name) := do
   | _ => return #[]
 
 private def normalizationProbes
-    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat) : MetaM (Array FrontierProbe) := do
+    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (budget? : Option Budget) : MetaM (Array FrontierProbe) := do
+  unless ← budgetOpen budget? do return #[]
   let mut probes := #[]
   let reduced ← whnf snap.target
   unless reduced == snap.target do
     probes := probes.push <| makeProbe "normalization" "whnf" "target" "changed"
       #[← renderExpr reduced chars]
 
-  if let some probe ← observingProbe? do
+  if let some probe ← observingProbe? budget? do
     let goal ← freshGoal snap.target
     let simpCtx ← Simp.Context.mkDefault
     let (result, _) ← simpTargetStar goal simpCtx
@@ -98,7 +117,7 @@ private def normalizationProbes
     | .noChange => return none
   then probes := probes.push probe
 
-  if let some probe ← observingProbe? do
+  if let some probe ← observingProbe? budget? do
     let goal ← freshGoal snap.target
     let simpCtx ← Simp.Context.mkDefault
     let propHyps ← getPropHyps
@@ -122,8 +141,8 @@ private def normalizationProbes
   return probes
 
 private def contradictionProbes
-    (snap : GoalSnapshot) : MetaM (Array FrontierProbe) := do
-  if let some probe ← observingProbe? do
+    (snap : GoalSnapshot) (budget? : Option Budget) : MetaM (Array FrontierProbe) := do
+  if let some probe ← observingProbe? budget? do
     let goal ← freshGoal snap.target
     goal.contradiction
     return some { (makeProbe "consistency" "contradiction-core" "local context" "closed") with executable := true }
@@ -131,14 +150,16 @@ private def contradictionProbes
   return #[]
 
 private def rewriteProbes
-    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat) : MetaM (Array FrontierProbe) := do
+    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (budget? : Option Budget) : MetaM (Array FrontierProbe) := do
   let mut probes := #[]
   for info in snap.locals do
+    unless ← budgetOpen budget? do break
     if probes.size ≥ cfg.frontierMaxPerPerspective then break
     if info.type.isEq then
       for symm in #[false, true] do
         if probes.size ≥ cfg.frontierMaxPerPerspective then break
-        if let some probe ← observingProbe? do
+        if let some probe ← observingProbe? budget? do
           let goal ← freshGoal snap.target
           let result ← goal.rewrite snap.target (mkFVar info.fvarId) (symm := symm)
           let child ← goal.replaceTargetEq result.eNew result.eqProof
@@ -150,12 +171,14 @@ private def rewriteProbes
   return probes
 
 private def eliminationProbes
-    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat) : MetaM (Array FrontierProbe) := do
+    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (budget? : Option Budget) : MetaM (Array FrontierProbe) := do
   let mut probes := #[]
   for info in snap.locals do
+    unless ← budgetOpen budget? do break
     if probes.size ≥ cfg.frontierMaxPerPerspective then break
     if (← isProp info.type) && !info.type.isEq && !info.type.isHEq then
-      if let some probe ← observingProbe? do
+      if let some probe ← observingProbe? budget? do
         let goal ← freshGoal snap.target
         let branches ← goal.cases info.fvarId
         if branches.isEmpty || branches.size > cfg.frontierMaxChildren then return none
@@ -166,11 +189,13 @@ private def eliminationProbes
   return probes
 
 private def constructionProbes
-    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat) : MetaM (Array FrontierProbe) := do
+    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (budget? : Option Budget) : MetaM (Array FrontierProbe) := do
   let mut probes := #[]
   for ctor in ← constructorsFor snap.target do
+    unless ← budgetOpen budget? do break
     if probes.size ≥ cfg.frontierMaxPerPerspective then break
-    if let some probe ← observingProbe? do
+    if let some probe ← observingProbe? budget? do
       let goal ← freshGoal snap.target
       let children ← goal.apply (← mkConstWithFreshMVarLevels ctor)
       if children.length > cfg.frontierMaxChildren then return none
@@ -181,11 +206,13 @@ private def constructionProbes
   return probes
 
 private def backwardProbes
-    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat) : MetaM (Array FrontierProbe) := do
+    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (budget? : Option Budget) : MetaM (Array FrontierProbe) := do
   let mut probes := #[]
   for info in snap.locals do
+    unless ← budgetOpen budget? do break
     if probes.size ≥ cfg.frontierMaxPerPerspective then break
-    if let some probe ← observingProbe? do
+    if let some probe ← observingProbe? budget? do
       let goal ← freshGoal snap.target
       let children ← goal.apply (mkFVar info.fvarId)
       if children.length > cfg.frontierMaxChildren then return none
@@ -200,7 +227,8 @@ private structure DerivedTerm where
   origin : String
 
 private def forwardProbe?
-    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat) : MetaM (Option FrontierProbe) := do
+    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (budget? : Option Budget) : MetaM (Option FrontierProbe) := do
   let mut pool : Array DerivedTerm := snap.locals.map fun info => {
     expr := mkFVar info.fvarId
     origin := toString info.userName
@@ -209,13 +237,16 @@ private def forwardProbe?
   let mut facts := #[]
   let mut seen : Std.HashSet UInt64 := {}
   for step in [0:cfg.frontierForwardDepth] do
+    unless ← budgetOpen budget? do break
     if facts.size ≥ cfg.frontierMaxFacts then break
     let mut next := #[]
     for fnTerm in frontier do
+      unless ← budgetOpen budget? do break
       if facts.size ≥ cfg.frontierMaxFacts then break
       let fnType ← whnf (← inferType fnTerm.expr)
       let .forallE _ domain _ _ := fnType | continue
       for argTerm in pool do
+        unless ← budgetOpen budget? do break
         if facts.size ≥ cfg.frontierMaxFacts then break
         let saved ← saveState
         let compatible ← try
@@ -240,13 +271,16 @@ private def forwardProbe?
   return some <| makeProbe "forward" "typed-local-closure" "local terms" "derived" #[] facts
 
 private def equalityChainProbe?
-    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat) : MetaM (Option FrontierProbe) := do
+    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (budget? : Option Budget) : MetaM (Option FrontierProbe) := do
   let equalities := snap.locals.filter fun info => info.type.isEq
   let mut facts := #[]
   for left in equalities do
+    unless ← budgetOpen budget? do break
     if facts.size ≥ cfg.frontierMaxFacts then break
     let some (_, _, leftRhs) := left.type.eq? | continue
     for right in equalities do
+      unless ← budgetOpen budget? do break
       if facts.size ≥ cfg.frontierMaxFacts then break
       if left.fvarId == right.fvarId then continue
       let some (_, rightLhs, _) := right.type.eq? | continue
@@ -264,23 +298,25 @@ private def equalityChainProbe?
     "derived" #[] facts
 
 /-- Build a diversity-balanced atlas. Each probe is at most one tactic layer plus bounded local closure. -/
-def build (snap : GoalSnapshot) (cfg : ProposeConfig) : MetaM (Array FrontierProbe) :=
+def build (snap : GoalSnapshot) (cfg : ProposeConfig)
+    (budget? : Option Budget := none) : MetaM (Array FrontierProbe) :=
   snap.goalId.withContext do
-    if !cfg.frontier || cfg.frontierMaxProbes = 0 then return #[]
+    if !cfg.frontier || cfg.frontierMaxProbes = 0 || !(← budgetOpen budget?) then return #[]
     let slots := max 1 (cfg.frontierMaxProbes * (cfg.frontierMaxChildren + cfg.frontierMaxFacts + 1))
     let chars := max 64 (cfg.frontierContextChars / slots)
-    let normalization ← normalizationProbes snap cfg chars
-    let contradiction ← contradictionProbes snap
-    let rewrites ← rewriteProbes snap cfg chars
-    let elimination ← eliminationProbes snap cfg chars
-    let construction ← constructionProbes snap cfg chars
-    let backward ← backwardProbes snap cfg chars
-    let forward := (← forwardProbe? snap cfg chars).map (#[·]) |>.getD #[]
-    let equality := (← equalityChainProbe? snap cfg chars).map (#[·]) |>.getD #[]
+    let normalization ← normalizationProbes snap cfg chars budget?
+    let contradiction ← contradictionProbes snap budget?
+    let rewrites ← rewriteProbes snap cfg chars budget?
+    let elimination ← eliminationProbes snap cfg chars budget?
+    let construction ← constructionProbes snap cfg chars budget?
+    let backward ← backwardProbes snap cfg chars budget?
+    let forward := (← forwardProbe? snap cfg chars budget?).map (#[·]) |>.getD #[]
+    let equality := (← equalityChainProbe? snap cfg chars budget?).map (#[·]) |>.getD #[]
     let groups := #[normalization, contradiction, rewrites, elimination,
       construction, backward, forward, equality]
     let mut atlas := #[]
     for index in [0:cfg.frontierMaxPerPerspective] do
+      unless ← budgetOpen budget? do break
       for group in groups do
         if atlas.size ≥ cfg.frontierMaxProbes then break
         if let some probe := group[index]? then atlas := atlas.push probe

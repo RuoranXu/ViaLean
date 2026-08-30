@@ -24,6 +24,7 @@ structure ProofAction where
   payload     : ProofActionPayload
   family      : ProposalFamily
   prior       : Float := 0.5
+  estimatedCost : Float := 1.0
   fingerprint : UInt64
 
 structure GoalBundle where
@@ -54,6 +55,7 @@ def Proposal.compile (proposal : Proposal) : ProofAction := {
   payload := .proposal proposal
   family := proposal.family
   prior := proposal.prior
+  estimatedCost := proposal.estimatedCost
   fingerprint := proposal.fingerprint
 }
 
