@@ -57,6 +57,14 @@ example (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by
   | .error _ => false
 
 #guard
+  match ModelProtocol.parseContinuation
+      "{\"continue\":[{\"probe_id\":\"probe-7\"},{\"probe_index\":2}]}" with
+  | .ok continuation =>
+      continuation.selections.size == 2 &&
+      continuation.selections[0]!.probeId? == some "probe-7" &&
+      continuation.selections[1]!.probeIndex? == some 2
+  | .error _ => false
+#guard
   let request : InteractionRequest := {
     requestId := "goal-1"
     round := 2
@@ -65,6 +73,15 @@ example (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by
     target := "R"
     locals := #["h : P ∨ Q"]
     actions := #[]
+    frontier := #[{
+      id := "probe-7"
+      perspective := "elimination"
+      operation := "cases-one-layer"
+      source := "h"
+      result := "branched"
+      executable := true
+      goals := #["P ⊢ R", "Q ⊢ R"]
+    }]
     feedback := #[{
       sequence := 0
       depth := 3
@@ -78,7 +95,8 @@ example (a b c : Nat) (h₁ : a = b) (h₂ : b = c) : a = c := by
   let text := ModelProtocol.interactionRequestText request
   text.contains "\"protocol\":\"vialean.interactive.v1\"" &&
   text.contains "\"search_feedback\"" && text.contains "\"depth\":3" &&
-  text.contains "\"action\":\"\"" && !text.contains "\"prior\""
+  text.contains "\"action\":\"\"" && text.contains "\"frontier\"" &&
+  text.contains "\"executable\":true" && !text.contains "\"prior\""
 
 example (P : Prop) : P → P := by
   propose

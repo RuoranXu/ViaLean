@@ -102,10 +102,11 @@ def query?
   let request ← buildRequest snap actions depth cfg.modelContextChars
   ModelProvider.query cfg request timeoutMs
 
-/-- Build a bounded interactive request with discrete search feedback. -/
+/-- Build a bounded interactive request with discrete search feedback and counterfactual views. -/
 def buildInteractionRequest
     (snap : GoalSnapshot) (actions : Array ProofAction) (depth round : Nat)
-    (feedback : Array SearchFeedback) (contextChars : Nat) : MetaM InteractionRequest := do
+    (feedback : Array SearchFeedback) (frontier : Array FrontierProbe)
+    (contextChars : Nat) : MetaM InteractionRequest := do
   let base ← buildRequest snap actions depth contextChars
   return {
     requestId := base.requestId
@@ -115,19 +116,21 @@ def buildInteractionRequest
     target := base.target
     locals := base.locals
     actions := base.actions
+    frontier
     feedback
   }
 
 /-- Query one non-scoring continuation round within the shared deadline. -/
 def queryInteraction?
     (snap : GoalSnapshot) (actions : Array ProofAction) (depth round : Nat)
-    (feedback : Array SearchFeedback) (cfg : ProposeConfig) (budget : Budget) :
+    (feedback : Array SearchFeedback) (frontier : Array FrontierProbe)
+    (cfg : ProposeConfig) (budget : Budget) :
     MetaM (Except String ModelContinuation) := do
   if !cfg.ai then return .error "interactive model guidance is disabled"
   let remaining ← budget.remainingMs
   let timeoutMs := min remaining cfg.modelTimeoutMs
   if timeoutMs = 0 then return .error "interactive model guidance has no remaining budget"
-  let request ← buildInteractionRequest snap actions depth round feedback cfg.modelContextChars
+  let request ← buildInteractionRequest snap actions depth round feedback frontier cfg.modelContextChars
   ModelProvider.queryInteraction cfg request timeoutMs
 end ModelGuidanceEngine
 end ViaLean

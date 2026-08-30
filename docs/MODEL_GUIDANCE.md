@@ -1,10 +1,10 @@
 # Model guidance
 
-ViaLean exposes two model modes over the same bounded, untrusted transport. Both modes receive only a rendered goal, local declarations, and actions already constructed by ViaLean. Neither mode accepts proof terms, tactic programs, shell commands, or new action payloads.
+ViaLean exposes two bounded, untrusted model modes. Both receive rendered Lean state and objects already constructed by ViaLean. Neither accepts proof terms, tactic programs, shell commands, or new executable payloads.
 
-## Interactive mode: search feedback, no scores
+## Interactive mode: diverse finite lookahead
 
-This mode is intended for iterative generation with dense forward signals:
+Interactive mode is designed for dense forward signal without scalar scoring or many rollouts:
 
 ```lean
 propose
@@ -14,20 +14,37 @@ propose
   (modelEndpoint := "http://127.0.0.1:8080/v1/chat/completions")
   (modelName := "local-model")
   (modelMaxRounds := 4)
-  (modelMaxFeedbackEvents := 48)
+  (frontierMaxProbes := 32)
+  (frontierForwardDepth := 2)
 ```
 
-Each round is strictly interleaved:
+For each unresolved node, ViaLean computes one frontier atlas and reuses it across rounds. Per-perspective quotas are merged round-robin, so repeated rewrites cannot crowd out elimination, construction, forward reasoning, or equality closure.
 
-1. the model sees the current goal, available action IDs, and bounded previous `search_feedback`;
-2. it selects one listed action by ID or array index, without a score;
-3. ViaLean disables model queries for that branch and runs its normal multi-depth search;
-4. every attempted controller action records its search depth, target, family, result, and elapsed time;
-5. after failure, the next model round receives those discrete events and can revise its continuation.
+| Perspective | Finite symbolic lookahead | Executable |
+|---|---|---|
+| `normalization` | WHNF, target-star simp, context-linked simp | yes |
+| `consistency` | local contradiction core | yes |
+| `rewrite` | each local equality in both orientations | yes |
+| `elimination` | one bounded cases layer and resulting goals | yes |
+| `construction` | each constructor and coupled obligations | yes |
+| `backward` | one local apply layer and premises required | yes |
+| `forward` | typed local application closure up to a small depth | observation only |
+| `equality-graph` | kernel-typed two-edge transitive consequences | observation only |
 
-A successful branch is validated and returned immediately. Unknown or repeated selections are ignored. Empty selections, malformed output, provider errors, and exhausted budgets return control to ViaLean's ordinary native ordering.
+Each interactive round is strict:
 
-Interactive request (`vialean.interactive.v1`):
+1. the model sees the goal, traditional actions, the complete bounded atlas, and previous search feedback;
+2. it selects one action (`id`/`index`) or executable probe (`probe_id`/`probe_index`), without returning a score;
+3. ViaLean disables model queries for the selected branch;
+4. an action runs normally, or a probe is replayed exactly on a fresh metavariable goal;
+5. generated subgoals are recursively searched under the shared deadline;
+6. success yields a validated proof; failure rolls back and emits depth/goal/action/outcome/timing events for the next round.
+
+Traditional actions may be empty: an executable frontier probe can independently drive the branch. Observation-only probes provide semantic guidance but are rejected if selected for execution.
+
+## Interactive protocol
+
+Request (`vialean.interactive.v1`, abbreviated):
 
 ```json
 {
@@ -40,12 +57,27 @@ Interactive request (`vialean.interactive.v1`):
     "target": "R",
     "locals": ["h : P ∨ Q", "hp : P → R", "hq : Q → R"]
   },
-  "actions": [
+  "actions": [],
+  "frontier": [
     {
-      "id": "92731...",
-      "family": "structural",
-      "kind": "structural",
-      "summary": "..."
+      "id": "74192...",
+      "perspective": "elimination",
+      "operation": "cases-one-layer",
+      "source": "h",
+      "result": "branched",
+      "executable": true,
+      "goals": ["P ⊢ R", "Q ⊢ R"],
+      "facts": []
+    },
+    {
+      "id": "91340...",
+      "perspective": "forward",
+      "operation": "typed-local-closure",
+      "source": "local terms",
+      "result": "derived",
+      "executable": false,
+      "goals": [],
+      "facts": ["step 1, hp ← ...", "step 2, ... ⟹ R"]
     }
   ],
   "search_feedback": [
@@ -54,8 +86,8 @@ Interactive request (`vialean.interactive.v1`):
       "depth": 2,
       "goal": "R",
       "action_id": "812...",
-      "family": "local_cut",
-      "action": "cut/local-hypothesis",
+      "family": "frontier/rewrite",
+      "action": "rewrite-forward/hEq",
       "outcome": "failed",
       "elapsed_ms": 7
     }
@@ -63,32 +95,28 @@ Interactive request (`vialean.interactive.v1`):
 }
 ```
 
-Interactive response:
+The interactive wire format intentionally omits action priors and all score fields.
+
+Select by stable ID:
 
 ```json
 {
-  "continue": [{"id": "92731..."}],
-  "rationale": "the failed cut suggests expanding the disjunction"
+  "continue": [{"probe_id": "74192..."}],
+  "rationale": "the elimination preview exposes two locally solvable branches"
 }
 ```
 
-`{"index": 0}` is also accepted. Although the parser accepts an ordered array for provider compatibility, the controller attempts at most one new selection before returning fresh search feedback.
+Or by request-local array index, useful for replay tests:
 
-## Policy mode: optional score mixing
-
-`modelMode := "policy"` is the default compatibility mode. For every unresolved node after the cheap native probe, ViaLean asks for a goal value and scores over existing action IDs. Scores are clamped to `[0, 1]`, mixed with local priors using `modelWeight`, and then executed through the same rollback and validation path.
-
-```lean
-propose
-  (ai := true)
-  (modelMode := "policy")
-  (modelProvider := "openai-compatible")
-  (modelEndpoint := "http://127.0.0.1:8080/v1/chat/completions")
-  (modelName := "local-model")
-  (modelWeight := 0.65)
+```json
+{"continue": [{"probe_index": 0}]}
 ```
 
-Policy response (`vialean.guidance.v1`):
+The parser accepts an ordered array for provider compatibility, but the controller executes at most one new selection before returning fresh feedback. Unknown, repeated, non-executable, or out-of-range selections are ignored.
+
+## Policy mode
+
+`modelMode := "policy"` remains the compatibility mode. It asks for a goal value and scores only over existing action IDs, clamps scores to `[0, 1]`, mixes them with local priors using `modelWeight`, and executes the reordered actions through normal rollback and validation.
 
 ```json
 {
@@ -98,13 +126,11 @@ Policy response (`vialean.guidance.v1`):
 }
 ```
 
-Duplicate IDs keep their highest score. Invalid and unknown IDs have no effect.
+The frontier is not computed in policy mode.
 
 ## Providers
 
 ### Local command
-
-The command is spawned directly without a shell. It reads one request from stdin and writes one response to stdout.
 
 ```lean
 propose
@@ -115,39 +141,41 @@ propose
   (modelCommandArgsJson := "[\"examples/model_adapter.py\"]")
 ```
 
-Arguments are a JSON array, so paths and flags are not shell-expanded. The process is terminated at its timeout, stdout is size-bounded, and diagnostic stderr is truncated. The included adapter dispatches on the `protocol` field and demonstrates both modes using only Python's standard library.
+The process is spawned directly without a shell, reads one JSON request from stdin, and writes one JSON response to stdout. Arguments are a JSON array, stdout is bounded, and the process is killed on timeout. The included adapter supports both protocols and prefers an unfailed executable frontier probe before traditional actions.
 
-### OpenAI-compatible API and local servers
+### OpenAI-compatible API
 
-`modelProvider := "openai-compatible"`, `"openai"`, and `"ollama"` use `/v1/chat/completions`. This covers hosted APIs and local compatible servers such as Ollama and llama.cpp. Requests use `curl` without a shell.
+`modelProvider := "openai-compatible"`, `"openai"`, and `"ollama"` use `/v1/chat/completions`, covering hosted APIs and compatible local Ollama/llama.cpp servers. Transport invokes `curl` without a shell.
 
-For authentication, set the environment variable named by `modelApiKeyEnv` (default `VIALEAN_API_KEY`). The secret is read at call time, rejected if it contains a newline, placed in a temporary curl config file, and never included in model traces or process arguments.
+The optional key is read from the environment variable named by `modelApiKeyEnv` (default `VIALEAN_API_KEY`), rejected if it contains a newline, placed in a temporary curl config, and never included in traces or process arguments.
 
 ### Replay
 
-`modelProvider := "replay"` parses `modelReplayResponse` directly. It is useful for deterministic protocol and proof-search tests.
+`modelProvider := "replay"` parses `modelReplayResponse` directly for deterministic protocol and proof-search tests.
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---:|---|
 | `ai` | `false` | Enable model queries. |
-| `modelMode` | `"policy"` | `policy` score mixing or non-scoring `interactive` feedback. |
+| `modelMode` | `"policy"` | Scored `policy` or non-scoring `interactive`. |
 | `modelProvider` | `"none"` | `command`, `openai-compatible`, `ollama`, or `replay`. |
 | `modelTimeoutMs` | `1500` | Per-round provider budget, capped by the global deadline. |
-| `modelMaxRounds` | `4` | Maximum interactive rounds at one search node. |
-| `modelMaxFeedbackEvents` | `48` | Tail of discrete events included in an interactive request. |
-| `modelWeight` | `0.65` | Policy-only mixture weight for action scores. |
-| `modelMaxSignals` | `16` | Maximum accepted scores or continuation selections. |
-| `modelContextChars` | `12000` | Bound while rendering goal/action context. |
-| `modelTemperature` | `0.0` | API sampling temperature. |
-| `modelMaxTokens` | `512` | API response token limit. |
-| `modelMaxResponseChars` | `65536` | Maximum provider stdout/API content size. |
-| `modelApiKeyEnv` | `"VIALEAN_API_KEY"` | Environment variable for an optional API key. |
-| `modelReplayResponse` | `""` | Fixed response for deterministic tests. |
+| `modelMaxRounds` | `4` | Interactive rounds at one node. |
+| `modelMaxFeedbackEvents` | `48` | Feedback tail sent to the model. |
+| `frontier` | `true` | Enable the atlas in interactive mode. |
+| `frontierMaxProbes` | `32` | Global atlas bound. |
+| `frontierMaxPerPerspective` | `4` | Diversity quota per perspective. |
+| `frontierMaxChildren` | `6` | Branch fan-out/render/replay bound. |
+| `frontierMaxFacts` | `12` | Forward/equality fact bound. |
+| `frontierForwardDepth` | `2` | Typed local forward-composition depth. |
+| `frontierContextChars` | `16000` | Atlas rendering budget. |
+| `modelContextChars` | `12000` | Goal/action rendering budget. |
+| `modelMaxResponseChars` | `65536` | Provider response bound. |
+| `modelReplayResponse` | `""` | Fixed deterministic response. |
 
 ## Privacy and trust
 
-When `ai` is false, no model process or HTTP request is made. When enabled, rendered goals, local declarations, actions, and (in interactive mode) search events are disclosed to the configured provider.
+When `ai` is false, no provider process or HTTP request is made. Interactive mode discloses rendered goals, locals, actions, atlas views, and feedback to the configured provider.
 
-Provider behavior cannot bypass proof validation: only existing actions can execute, model-selected branches run with further model calls disabled, failed branches roll back, unresolved metavariables and `sorryAx` are rejected, and Lean's kernel checks the final expression.
+The model cannot bypass validation: serialized probes contain no private replay handles, only ViaLean-created executable probes can replay, preview states are rolled back, nested model calls are disabled, unresolved metavariables and `sorryAx` are rejected, and Lean's kernel checks the final expression.

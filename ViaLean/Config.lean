@@ -48,5 +48,12 @@ structure ProposeConfig where
   nativeTransforms        : Bool := true
   nativeCases             : Bool := true
   nativeMaxCaseBranches   : Nat := 6
+  frontier                : Bool := true
+  frontierMaxProbes       : Nat := 32
+  frontierMaxPerPerspective : Nat := 4
+  frontierMaxChildren     : Nat := 6
+  frontierMaxFacts        : Nat := 12
+  frontierForwardDepth    : Nat := 2
+  frontierContextChars    : Nat := 16000
 
 end ViaLean

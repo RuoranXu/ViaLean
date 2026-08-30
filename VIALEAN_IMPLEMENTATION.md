@@ -2,58 +2,69 @@
 
 ## Scope
 
-ViaLean is an independent Lean 4 proof-search library. Its leaf solver, bridge search, scheduling, validation, optional model guidance, tracing, and tactic frontend are implemented in this repository with ordinary Lean metaprogramming APIs.
+ViaLean is an independent Lean 4 proof-search library. Its leaf solver, symbolic frontier, bridge search, scheduling, validation, optional model guidance, tracing, and tactic frontend are implemented in this repository with ordinary Lean metaprogramming APIs.
 
-The engine is deliberately bounded. It is intended to find short compositional proofs, not to replace domain-specific automation.
+The engine is deliberately bounded. It searches a small, semantically varied near frontier instead of launching many long speculative rollouts.
 
 ## Search model
 
-A search node owns a goal, remaining budget, depth, path fingerprints, discrete feedback storage, and a shared guidance cache. The controller first tries a cheap native close, then constructs every enabled proof action. Policy mode mixes untrusted scores over existing actions with local priors. Interactive mode instead chooses one existing action, disables further model calls during its multi-depth branch search, records discrete action/depth/outcome events, and exposes those events to the next model round. Every failed branch restores its metavariable state.
+A node owns a goal, global deadline, depth, path fingerprints, discrete feedback storage, and a guidance cache. The controller performs a cheap close, collects proof actions, and—only in interactive mode—constructs one diversity-balanced frontier atlas for all model rounds at that node.
 
-The native solver supports:
+The atlas separates symbolic perspectives so one prolific family cannot dominate:
 
-- exact local hypotheses;
-- reflexive equality and `True`;
-- contradiction detection across local hypotheses;
-- simplification and target rewriting using local propositions and equality hypotheses;
-- dependent introductions;
-- inductive constructors;
-- bounded case analysis over propositional inductive hypotheses;
-- application of local declarations;
-- application of explicitly supplied global premises;
-- recursive solving of all generated subgoals.
+- weak-head, target-star, and context normalization;
+- local contradiction closure;
+- each equality in both rewrite orientations;
+- one-layer elimination of bounded inductive propositions;
+- each target constructor and its coupled obligations;
+- backward application of local declarations;
+- typed local forward closure up to `frontierForwardDepth`;
+- kernel-typed two-edge equality transitivity.
 
-`nativeMaxDepth`, `nativeMaxApplications`, and `nativeMaxCaseBranches` bound recursive and branching expansion. `nativeTransforms` and `nativeCases` can disable the additional transform layers. The controller's deadline is passed to every leaf and model attempt, so nested search cannot silently acquire a fresh unbounded timeout.
+Preview tactics run under saved metavariable states and retain rendered strings only. Executable probes also retain private stable replay handles (`FVarId` or constructor name), which are never serialized. When selected, the controller creates a fresh goal, replays exactly that operation, disables nested model queries, recursively solves the generated metavariables, and extracts the completed root assignment. Failure restores the complete branch while IO feedback remains available for the next model round.
+
+The native solver independently supports exact hypotheses, reflexivity, `True`, contradiction, simplification/rewrite normalization, dependent introductions, constructors, bounded propositional cases, local/global premise application, and recursive subgoal solving.
+
+## Bounds
+
+- `frontierMaxProbes`: total atlas size.
+- `frontierMaxPerPerspective`: quota before round-robin merging.
+- `frontierMaxChildren`: maximum displayed or replayed branch fan-out.
+- `frontierMaxFacts`: maximum forward/equality facts.
+- `frontierForwardDepth`: typed forward-composition depth.
+- `frontierContextChars`: rendering budget for atlas items.
+- `modelMaxRounds` and `modelMaxFeedbackEvents`: interaction bounds.
+- `nativeMaxDepth`, `nativeMaxApplications`, and the shared deadline: recursive execution bounds.
 
 ## Modules
 
-- `ViaLean/Config.lean`: public search and provider configuration.
-- `ViaLean/Goal.lean`: stable goal snapshots and fingerprints.
-- `ViaLean/Proposal.lean`: proposal protocol and deterministic ranking.
-- `ViaLean/Action.lean`: project-owned proof-action representation.
+- `ViaLean/Config.lean`: search, frontier, and provider configuration.
+- `ViaLean/Goal.lean`: goal snapshots and fingerprints.
+- `ViaLean/Proposal.lean`, `Action.lean`: project-owned action representation.
+- `ViaLean/Frontier.lean`: bounded multi-perspective previews and private replay handles.
 - `ViaLean/NativeSolver.lean`: independent bounded leaf solver.
-- `ViaLean/Model/Protocol.lean`: stable policy and interactive JSON types, bounds, and validation.
-- `ViaLean/Model/Process.lean`: shell-free process execution with termination on timeout.
+- `ViaLean/Model/Protocol.lean`: policy/interactive JSON, frontier views, and selection parsing.
+- `ViaLean/Model/Process.lean`: shell-free process execution and timeout termination.
 - `ViaLean/Model/Provider.lean`: command, replay, and OpenAI-compatible transports.
-- `ViaLean/Model/Guidance.lean`: bounded policy requests and interactive search-feedback rendering.
-- `ViaLean/Search.lean`: AND/OR controller, dual model modes, feedback events, and rollback boundaries.
-- `ViaLean/Compose.lean`: proof construction for successful actions.
-- `ViaLean/Validate.lean`: target checking and metavariable rejection.
-- `ViaLean/Tactic.lean`: `propose` and `propose?` syntax.
-- `ViaLeanTest/`: executable regression, protocol, and safety tests.
+- `ViaLean/Model/Guidance.lean`: bounded request rendering.
+- `ViaLean/Search.lean`: AND/OR control, probe replay, model isolation, feedback, and rollback.
+- `ViaLean/Compose.lean`, `Validate.lean`: proof construction and trust boundary.
+- `ViaLean/Tactic.lean`: `propose` and `propose?`.
+- `ViaLeanTest/`: regression, frontier diversity, protocol, replay, and safety tests.
 
 ## Safety invariants
 
-1. A proof containing synthetic metavariables is never returned.
-2. A returned expression is checked against the requested target.
-3. Failed branches cannot retain assignments in the caller's metavariable context.
-4. Search never uses `sorry`, `admit`, `unsafe`, native code loading, or generated proof text.
-5. A model can only score or select action IDs already built by ViaLean; it cannot create an executable action.
-6. Interactive model-selected branches disable nested model calls and return only discrete native-search feedback.
-7. Provider failures and malformed output degrade to native search.
-8. Provider processes have a per-call timeout capped by the global deadline.
-9. The original goal is assigned only after the complete candidate proof validates.
+1. A returned proof contains no unresolved synthetic metavariables.
+2. Every returned expression is checked against the requested target.
+3. Preview and failed replay branches restore their metavariable state.
+4. Search never uses `sorry`, `admit`, `unsafe`, generated proof text, or native code loading.
+5. A model can select only serialized existing actions or executable probes; private replay handles are created by ViaLean.
+6. Model-selected replay disables nested model calls.
+7. Observation-only probes cannot close a goal.
+8. Provider failures and malformed selections degrade to native search.
+9. Provider calls and recursive solving share the global deadline.
+10. The original goal is assigned only after complete candidate validation.
 
 ## Compatibility policy
 
-The package has no Lake dependencies and no version-specific runtime linkage. Source compatibility is maintained against Lean's public metaprogramming surface. API mode uses the external `curl` executable rather than adding a linked HTTP package. Toolchain selection remains explicit for reproducible builds, while the implementation itself contains no release-number tests or per-version code paths.
+The package has no Lake dependencies and no version-specific runtime linkage. It uses Lean's metaprogramming surface without release-number tests or per-version branches. Toolchain selection remains explicit for reproducible builds; API transport uses the external `curl` executable rather than a linked HTTP package.

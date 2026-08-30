@@ -257,16 +257,71 @@ mutual
       return some (← composeAction snap.target (.existsIntro witness) #[childProof])
     | .structural _ => tryStructural? snap state depth
 
+  partial def solveFrontierChildren
+      (children : Array MVarId) (state : SearchState) (depth : Nat) : MetaM Bool := do
+    for child in children do
+      unless ← child.isAssigned do
+        let some proof ← solveGoal? child state (depth + 1) | return false
+        child.assign proof
+    return true
+
+  /-- Replay a selected symbolic preview and solve only the finite obligations it exposes. -/
+  partial def tryFrontierProbe?
+      (snap : GoalSnapshot) (probe : FrontierProbe)
+      (state : SearchState) (depth : Nat) : MetaM (Option Expr) := snap.goalId.withContext do
+    if !probe.executable then return none
+    let root ← freshGoal snap.target
+    let mut children : Array MVarId := #[]
+    match probe.operation with
+    | "whnf" =>
+        let child ← root.replaceTargetDefEq (← whnf snap.target)
+        children := #[child]
+    | "simp-target-star" =>
+        let simpCtx ← Simp.Context.mkDefault
+        let (result, _) ← simpTargetStar root simpCtx
+        match result with
+        | .closed => pure ()
+        | .modified child => children := #[child]
+        | .noChange => return none
+    | "simp-context" =>
+        let simpCtx ← Simp.Context.mkDefault
+        let propHyps ← getPropHyps
+        let (result?, _) ← simpGoal root simpCtx (fvarIdsToSimp := propHyps)
+        if let some (_, child) := result? then children := #[child]
+    | "contradiction-core" => root.contradiction
+    | "rewrite-forward" | "rewrite-reverse" =>
+        let some subject := probe.subject? | return none
+        let result ← root.rewrite snap.target (mkFVar subject) (symm := probe.symm)
+        let child ← root.replaceTargetEq result.eNew result.eqProof
+        children := #[child] ++ result.mvarIds
+    | "cases-one-layer" =>
+        let some subject := probe.subject? | return none
+        let branches ← root.cases subject
+        children := branches.map (·.mvarId)
+    | "constructor-one-layer" =>
+        let some ctor := probe.constructor? | return none
+        children := (← root.apply (← mkConstWithFreshMVarLevels ctor)).toArray
+    | "apply-one-layer" =>
+        let some subject := probe.subject? | return none
+        children := (← root.apply (mkFVar subject)).toArray
+    | _ => return none
+    if children.size > state.config.frontierMaxChildren then return none
+    unless ← solveFrontierChildren children state depth do return none
+    let some proof ← getExprMVarAssignment? root | return none
+    return some (← finalizeProof snap.target proof)
   partial def tryInteractive?
       (snap : GoalSnapshot) (actions : Array ProofAction)
       (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
-    if actions.isEmpty || state.config.modelMaxRounds = 0 then return none
+    if state.config.modelMaxRounds = 0 then return none
+    let frontier ← FrontierEngine.build snap state.config
+    if actions.isEmpty && frontier.isEmpty then return none
     let mut attempted : Std.HashSet UInt64 := {}
+    let mut attemptedProbes : Std.HashSet String := {}
     for round in [0:state.config.modelMaxRounds] do
       if (← state.budget.remainingMs) = 0 then break
       let feedback ← feedbackWindow state
       let response ← ModelGuidanceEngine.queryInteraction?
-        snap actions depth round feedback state.config state.budget
+        snap actions depth round feedback frontier state.config state.budget
       let continuation ← match response with
         | .ok continuation => pure continuation
         | .error error =>
@@ -274,24 +329,52 @@ mutual
             break
       if state.config.trace then
         trace[ViaLean.model]
-          "interactive round={round}, feedback={feedback.size}, selections={continuation.selections.size}"
+          "interactive round={round}, frontier={frontier.size}, feedback={feedback.size}, selections={continuation.selections.size}"
       let mut madeProgress := false
       for selection in continuation.selections do
         let action? := match selection.actionId? with
           | some id => actions.find? fun (action : ProofAction) => action.fingerprint == id
           | none => selection.index?.bind fun index => actions[index]?
-        let some action := action? | continue
-        if attempted.contains action.fingerprint then continue
-        attempted := attempted.insert action.fingerprint
+        if let some action := action? then
+          if attempted.contains action.fingerprint then continue
+          attempted := attempted.insert action.fingerprint
+          madeProgress := true
+          let childState := { state with modelEnabled := false }
+          if let some proof ← observingMeta? <| tryProofAction? snap action childState depth then
+            return some proof
+          break
+        let probe? := match selection.probeId? with
+          | some probeId => frontier.find? fun (probe : FrontierProbe) => probe.id == probeId && probe.executable
+          | none => selection.probeIndex?.bind fun index =>
+              frontier[index]?.filter fun (probe : FrontierProbe) => probe.executable
+        let some probe := probe? | continue
+        if attemptedProbes.contains probe.id then continue
+        attemptedProbes := attemptedProbes.insert probe.id
         madeProgress := true
         let childState := { state with modelEnabled := false }
-        if let some proof ← observingMeta? <| tryProofAction? snap action childState depth then
-          return some proof
-        -- Strict interleaving: report this failed non-model search before another choice.
+        if state.config.trace then
+          trace[ViaLean.model]
+            "select probe perspective={probe.perspective}, operation={probe.operation}, source={probe.source}, goals={probe.goals.size}, facts={probe.facts.size}"
+        let started ← IO.monoMsNow
+        let proof? ← observingMeta? <| tryFrontierProbe? snap probe childState depth
+        let elapsedMs := (← IO.monoMsNow) - started
+        let events ← state.feedback.get
+        let rendered := (← ppExpr snap.target).pretty
+        let event : SearchFeedback := {
+          sequence := events.size
+          depth
+          goal := if rendered.length ≤ 512 then rendered else (rendered.take 512).toString ++ "…"
+          actionId := probe.id
+          family := s!"frontier/{probe.perspective}"
+          action := s!"{probe.operation}/{probe.source}"
+          outcome := if proof?.isSome then "solved" else "failed"
+          elapsedMs
+        }
+        state.feedback.set (events.push event)
+        if let some proof := proof? then return some proof
         break
       if !madeProgress then break
-    return none
-  partial def tryProofAction?
+    return none  partial def tryProofAction?
       (snap : GoalSnapshot) (action : ProofAction)
       (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
     let started ← IO.monoMsNow
@@ -351,6 +434,9 @@ def diagnose (goal : MVarId) (config : ProposeConfig) : MetaM MessageData := goa
   let equalities ← if config.equalityBridge then equalityProposals snap config else pure #[]
   let witnesses ← if config.witnesses then witnessProposals snap config else pure #[]
   let cuts ← if config.cuts then localCutProposals snap config else pure #[]
+  let frontier ← if config.frontier then FrontierEngine.build snap config else pure #[]
+  let perspectives := String.intercalate "," <|
+    (frontier.map (·.perspective)).toList.eraseDups
   let direct ← if config.directProbeSec = 0 then pure none else do
     let budget ← Budget.start config.directProbeSec
     let scheduler ← SchedulerState.create
@@ -358,6 +444,7 @@ def diagnose (goal : MVarId) (config : ProposeConfig) : MetaM MessageData := goa
     let feedback ← IO.mkRef #[]
     directProof? goal { config, budget, scheduler, guidanceCache, feedback } config.directProbeSec
   return m!"ViaLean: shape={repr snap.shape}, direct={direct.isSome}, " ++
-    m!"equality={equalities.size}, witness={witnesses.size}, cuts={cuts.size}"
+    m!"equality={equalities.size}, witness={witnesses.size}, cuts={cuts.size}, " ++
+    m!"frontier={frontier.size} [{perspectives}]"
 
 end ViaLean

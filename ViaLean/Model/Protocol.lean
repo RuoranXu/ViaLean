@@ -1,4 +1,5 @@
 import ViaLean.Action
+import ViaLean.Frontier
 import Lean.Data.Json.FromToJson
 
 open Lean
@@ -48,6 +49,7 @@ structure InteractionRequest where
   target    : String
   locals    : Array String
   actions   : Array ModelActionView
+  frontier  : Array FrontierProbe := #[]
   feedback  : Array SearchFeedback := #[]
 
 deriving Inhabited, Repr
@@ -55,6 +57,8 @@ deriving Inhabited, Repr
 structure ModelSelection where
   actionId? : Option UInt64 := none
   index?    : Option Nat := none
+  probeId?  : Option String := none
+  probeIndex? : Option Nat := none
 
 deriving Inhabited, Repr
 
@@ -123,6 +127,16 @@ private def interactionActionToJson (action : ModelActionView) : Json := Json.mk
   ("kind", action.kind),
   ("summary", action.summary)
 ]
+private def frontierToJson (probe : FrontierProbe) : Json := Json.mkObj [
+  ("id", probe.id),
+  ("perspective", probe.perspective),
+  ("operation", probe.operation),
+  ("source", probe.source),
+  ("result", probe.result),
+  ("executable", probe.executable),
+  ("goals", toJson probe.goals),
+  ("facts", toJson probe.facts)
+]
 private def feedbackToJson (event : SearchFeedback) : Json := Json.mkObj [
   ("sequence", event.sequence),
   ("depth", event.depth),
@@ -145,6 +159,7 @@ def interactionRequestToJson (request : InteractionRequest) : Json := Json.mkObj
     ("locals", toJson request.locals)
   ]),
   ("actions", Json.arr (request.actions.map interactionActionToJson)),
+  ("frontier", Json.arr (request.frontier.map frontierToJson)),
   ("search_feedback", Json.arr (request.feedback.map feedbackToJson))
 ]
 
@@ -260,8 +275,15 @@ private def parseSelection (json : Json) : Except String ModelSelection := do
       let index? := match json.getObjVal? "index" with
         | .ok indexJson => (fromJson? indexJson : Except String Nat).toOption
         | .error _ => none
-      if actionId?.isNone && index?.isNone then throw "selection requires id or index"
-      return { actionId?, index? }
+      let probeId? := match json.getObjVal? "probe_id" with
+        | .ok probeJson => probeJson.getStr?.toOption
+        | .error _ => none
+      let probeIndex? := match json.getObjVal? "probe_index" with
+        | .ok indexJson => (fromJson? indexJson : Except String Nat).toOption
+        | .error _ => none
+      if actionId?.isNone && index?.isNone && probeId?.isNone && probeIndex?.isNone then
+        throw "selection requires id, index, probe_id, or probe_index"
+      return { actionId?, index?, probeId?, probeIndex? }
 
 private def looksLikeContinuation (json : Json) : Bool :=
   (json.getObjVal? "continue").isOk

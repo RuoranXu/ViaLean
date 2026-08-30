@@ -15,7 +15,7 @@ private def systemPrompt : String :=
 
 private def interactiveSystemPrompt : String :=
   "You guide Lean proof search without scoring or writing proofs. The user JSON contains " ++
-  "kernel-checkable actions and search_feedback produced by model-disabled multi-depth search. " ++
+  "kernel-checkable actions, a diverse bounded symbolic frontier, and search_feedback from model-disabled search. " ++
   "Return JSON only: {\"continue\":[{\"id\":string} or {\"index\":number}]," ++
   "\"rationale\":short string}. Choose only listed actions. Use feedback to revise the next choice."
 private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : Json := Json.mkObj [

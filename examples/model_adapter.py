@@ -32,12 +32,20 @@ def score_actions(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def continue_search(request: dict[str, Any]) -> dict[str, Any]:
-    """Choose one untried action after reading discrete multi-depth feedback."""
+    """Choose one untried executable probe or action after reading symbolic views and feedback."""
     failed = {
         str(event.get("action_id"))
         for event in request.get("search_feedback", [])
         if event.get("outcome") == "failed"
     }
+    frontier = request.get("frontier", [])
+    for probe in frontier:
+        if probe.get("executable") and str(probe.get("id")) not in failed:
+            return {
+                "continue": [{"probe_id": str(probe["id"])}],
+                "rationale": "selected a diverse executable symbolic counterfactual",
+            }
+
     actions = request.get("actions", [])
     preferred = sorted(
         enumerate(actions),
@@ -47,9 +55,9 @@ def continue_search(request: dict[str, Any]) -> dict[str, Any]:
         if str(action.get("id")) not in failed:
             return {
                 "continue": [{"id": str(action["id"])}],
-                "rationale": "example continuation selected an action not failed in feedback",
+                "rationale": "selected an action not failed in search feedback",
             }
-    return {"continue": [], "rationale": "all offered actions were already attempted"}
+    return {"continue": [], "rationale": "all executable probes and actions were attempted"}
 
 
 def main() -> None:
