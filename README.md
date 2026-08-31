@@ -1,6 +1,6 @@
 # ViaLean
 
-ViaLean is an independent, kernel-checked proof-search engine implemented in Lean 4. It combines bounded native transformations, a diversity-balanced symbolic frontier, compositional proof actions, and optional external-model guidance while keeping Lean's kernel as the only proof authority.
+ViaLean combines bounded native transformations, a diversity-balanced symbolic frontier, compositional proof actions, and optional external-model guidance while keeping Lean's kernel as the only proof authority.
 
 ## Design
 
