@@ -4,9 +4,9 @@
 
 ViaLean is a research proof-search engine implemented entirely in Lean 4. Instead of asking a model to discover a complete proof through repeated long rollouts, ViaLean constructs a small, heterogeneous atlas of legal symbolic continuations, executes bounded lookahead, and lets either a symbolic scheduler or an external model choose among the resulting proof futures.
 
-The central design goal is simple:
+The central design goal is simple but important in LLM post‑training:
 
-> Make rare but valid proof local strategies visible before asking a model to rank them.
+> Make rare but valid local proof strategies visible before asking a model to rank them.
 
 ViaLean provides its own proof-search controller and bounded symbolic frontier. Its default search path is offline, has no Lake package dependencies, and treats Lean's kernel as the only proof authority.
 
