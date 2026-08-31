@@ -16,17 +16,6 @@ Formal proofs are combinatorial. A useful route may require an unusual rewrite, 
 
 The frontier emphasizes **strategy diversity**, not merely token-level variation. Independent quotas keep normalization, rewriting, elimination, construction, backward reasoning, forward reasoning, equality closure, and multi-step future paths from crowding one another out.
 
-## Highlights
-
-| Capability | What ViaLean does |
-| --- | --- |
-| Diverse symbolic frontier | Builds bounded proposals across multiple proof mechanisms with per-perspective quotas. |
-| Future atlas | Executes shallow, width-bounded multi-step lookahead and records full goal states, paths, and qualitative closure signals. |
-| Executable counterfactuals | Replays selected symbolic probes on a fresh goal and recursively solves only the obligations they expose. |
-| Hybrid guidance | Runs fully offline by default, or uses policy scoring and interactive model guidance when explicitly enabled. |
-| Compositional proof actions | Supports equality and iff bridges, local cuts, existential witnesses, structural reasoning, and retrieved premises. |
-| Bounded execution | Shares a wall-clock deadline across frontier expansion, model requests, replay, and recursive search. |
-| Explicit trust boundary | Rejects `sorry`, unresolved metavariables, unsafe model tactics, and candidates whose inferred type does not match the target. |
 
 ## Quick start
 
@@ -80,26 +69,6 @@ propose via_witness witnessTerm
 ```
 
 Each bridge is elaborated against the current goal, validated for progress, and accepted only if the completed proof passes the final trust boundary.
-
-## The symbolic frontier
-
-For each unresolved node, interactive search builds one bounded atlas and reuses it across model rounds.
-
-| Perspective | Lookahead | Executable |
-| --- | --- | :---: |
-| `normalization` | Weak-head, target, and context-linked simplification | Yes |
-| `consistency` | Local contradiction closure | Yes |
-| `rewrite` | Each local equality in both directions | Yes |
-| `elimination` | One bounded layer of case analysis | Yes |
-| `construction` | Target constructors and their coupled obligations | Yes |
-| `backward` | Application of local declarations to the target | Yes |
-| `forward` | Bounded typed local forward chaining | No |
-| `equality-graph` | Kernel-typed two-edge equality consequences | No |
-| `future-graph` | Multi-step intro, simp, apply, constructor, cases, and rewrite paths | No |
-
-Executable probes retain private replay handles and can drive a proof branch. Observation-only probes expose runtime consequences to the controller or model but can never masquerade as proof steps.
-
-The default future graph is intentionally small: depth `3`, width `6`, and at most `24` nodes. Global probe count, per-perspective quotas, branch fan-out, derived facts, rendered context, recursion, and total time are all bounded independently.
 
 ## Optional model guidance
 
