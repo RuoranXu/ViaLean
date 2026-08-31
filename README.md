@@ -6,27 +6,13 @@ ViaLean is a research proof-search engine implemented entirely in Lean 4. Instea
 
 The central design goal is simple:
 
-> Make rare but valid proof strategies visible before asking a model to rank them.
+> Make rare but valid proof local strategies visible before asking a model to rank them.
 
 ViaLean provides its own proof-search controller and bounded symbolic frontier. Its default search path is offline, has no Lake package dependencies, and treats Lean's kernel as the only proof authority.
 
 ## Why ViaLean?
 
 Formal proofs are combinatorial. A useful route may require an unusual rewrite, a rare theorem application, or a non-obvious case split in exactly the right order. Under finite neural sampling, such a route can remain invisible even when it already exists in the model's latent repertoire.
-
-ViaLean moves this bottleneck from unconstrained generation to grounded selection:
-
-```mermaid
-flowchart TD
-    G["Lean goal"] --> F["Heterogeneous symbolic frontier"]
-    F --> L["Bounded future atlas"]
-    L --> R{"Route selection"}
-    R --> S["Symbolic scheduler"]
-    R --> M["Optional model"]
-    S --> E["Replay and solve obligations"]
-    M --> E
-    E --> K["Kernel-checked proof"]
-```
 
 The frontier emphasizes **strategy diversity**, not merely token-level variation. Independent quotas keep normalization, rewriting, elimination, construction, backward reasoning, forward reasoning, equality closure, and multi-step future paths from crowding one another out.
 
