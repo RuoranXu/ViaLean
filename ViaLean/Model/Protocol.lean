@@ -175,6 +175,250 @@ def interactionRequestToJson (request : InteractionRequest) : Json := Json.mkObj
 def interactionRequestText (request : InteractionRequest) : String :=
   (interactionRequestToJson request).compress
 
+/-- Serialize a valid request under an absolute character cap. Low-value history is
+removed before local context; if even the minimal request cannot fit, emit `{}`. -/
+partial def interactionRequestTextCapped
+    (request : InteractionRequest) (maxChars : Nat) : String :=
+  let text := interactionRequestText request
+  if text.length <= maxChars then text
+  else if !request.feedback.isEmpty then
+    interactionRequestTextCapped { request with feedback := request.feedback.extract 1 request.feedback.size } maxChars
+  else if request.frontier.any (fun probe => !probe.future.isEmpty) then
+    interactionRequestTextCapped { request with frontier := request.frontier.map fun probe =>
+      { probe with future := #[] } } maxChars
+  else if request.frontier.size > 1 then
+    interactionRequestTextCapped { request with frontier := request.frontier.extract 0 (request.frontier.size / 2) } maxChars
+  else if request.actions.size > 1 then
+    interactionRequestTextCapped { request with actions := request.actions.extract 0 (request.actions.size / 2) } maxChars
+  else if request.locals.size > 1 then
+    interactionRequestTextCapped { request with locals := request.locals.extract 0 (request.locals.size / 2) } maxChars
+  else if request.target.length > 64 then
+    interactionRequestTextCapped { request with target := (request.target.take (request.target.length / 2)).toString } maxChars
+  else if text.length <= maxChars then text
+  else if maxChars >= 2 then "{}" else ""
+
+structure PlannerBudgetView where
+  remainingMs : Nat
+  remainingAtlasWork : Nat
+deriving Inhabited, Repr
+
+structure PlannerRootView where
+  id : String
+  shape : String
+  goal : String
+deriving Inhabited, Repr
+
+structure PlannerRegionView where
+  id : String
+  family : String
+  size : Nat
+  signals : Array String := #[]
+  representatives : Array String := #[]
+deriving Inhabited, Repr
+
+structure PlannerNodeView where
+  id : String
+  depth : Nat
+  goal : String
+  subgoals : Nat := 1
+  exactLocal : Bool := false
+  contradiction : Bool := false
+deriving Inhabited, Repr
+
+structure PlannerTransitionView where
+  id : String
+  sourceId : String
+  targetIds : Array String := #[]
+  family : String
+  operation : String
+  cost : Float := 1.0
+  executable : Bool := true
+deriving Inhabited, Repr
+
+structure PlannerObservationView where
+  transition? : Option String := none
+  outcome : String
+  failureClass? : Option String := none
+deriving Inhabited, Repr
+
+structure PlannerRequestV2 where
+  requestId : String
+  workspaceVersion : Nat
+  budget : PlannerBudgetView
+  root : PlannerRootView
+  regions : Array PlannerRegionView := #[]
+  nodes : Array PlannerNodeView := #[]
+  transitions : Array PlannerTransitionView := #[]
+  observations : Array PlannerObservationView := #[]
+deriving Inhabited, Repr
+
+structure PlannerRegionScore where
+  id : String
+  score : Float
+deriving Inhabited, Repr
+
+structure PlannerTransitionScore where
+  id : String
+  policy : Float := 0.5
+  value : Float := 0.5
+  confidence : Float := 0.5
+deriving Inhabited, Repr
+
+structure StrategyPlan where
+  primaryFamily? : Option String := none
+  objective? : Option String := none
+deriving Inhabited, Repr
+
+structure ExpansionRequest where
+  regionId : String
+  extraDepth : Nat := 0
+  family? : Option String := none
+deriving Inhabited, Repr
+
+structure PlannerThoughtView where
+  id : String
+  kind : String
+  expressionRef : String
+  dependencies : Array String := #[]
+deriving Inhabited, Repr
+
+structure PlannerResponseV2 where
+  rootValue : Float := 0.5
+  confidence : Float := 0.5
+  preferredRegions : Array PlannerRegionScore := #[]
+  transitionScores : Array PlannerTransitionScore := #[]
+  strategy : StrategyPlan := {}
+  expansionRequests : Array ExpansionRequest := #[]
+  thoughts : Array PlannerThoughtView := #[]
+  leanCandidates : Array String := #[]
+deriving Inhabited, Repr
+
+def plannerVersion : String := "vialean.planner.v2"
+
+private def plannerRegionToJson (region : PlannerRegionView) : Json := Json.mkObj [
+  ("id", region.id), ("family", region.family), ("size", region.size),
+  ("signals", toJson region.signals), ("representatives", toJson region.representatives)]
+
+private def plannerNodeToJson (node : PlannerNodeView) : Json := Json.mkObj [
+  ("id", node.id), ("depth", node.depth), ("goal", node.goal),
+  ("signals", Json.mkObj [("subgoals", node.subgoals), ("exact_local", node.exactLocal),
+    ("contradiction", node.contradiction)])]
+
+private def plannerTransitionToJson (transition : PlannerTransitionView) : Json := Json.mkObj [
+  ("id", transition.id), ("from", transition.sourceId), ("to", toJson transition.targetIds),
+  ("family", transition.family), ("operation", transition.operation),
+  ("cost", toJson transition.cost), ("executable", transition.executable)]
+
+private def plannerObservationToJson (observation : PlannerObservationView) : Json := Json.mkObj [
+  ("transition", observation.transition?.map Json.str |>.getD Json.null),
+  ("outcome", observation.outcome),
+  ("class", observation.failureClass?.map Json.str |>.getD Json.null)]
+
+def plannerRequestToJson (request : PlannerRequestV2) : Json := Json.mkObj [
+  ("version", plannerVersion), ("request_id", request.requestId),
+  ("workspace_version", request.workspaceVersion),
+  ("budget", Json.mkObj [("remaining_ms", request.budget.remainingMs),
+    ("remaining_atlas_work", request.budget.remainingAtlasWork)]),
+  ("root", Json.mkObj [("id", request.root.id), ("shape", request.root.shape),
+    ("goal", request.root.goal)]),
+  ("regions", Json.arr (request.regions.map plannerRegionToJson)),
+  ("nodes", Json.arr (request.nodes.map plannerNodeToJson)),
+  ("transitions", Json.arr (request.transitions.map plannerTransitionToJson)),
+  ("observations", Json.arr (request.observations.map plannerObservationToJson))]
+
+def plannerRequestText (request : PlannerRequestV2) : String :=
+  (plannerRequestToJson request).compress
+
+/-- Planner payload hard cap with deterministic semantic degradation. -/
+partial def plannerRequestTextCapped (request : PlannerRequestV2) (maxChars : Nat) : String :=
+  let text := plannerRequestText request
+  if text.length <= maxChars then text
+  else if !request.observations.isEmpty then
+    plannerRequestTextCapped { request with observations := request.observations.extract 1 request.observations.size } maxChars
+  else if request.nodes.size > request.regions.size && request.nodes.size > 1 then
+    plannerRequestTextCapped { request with nodes := request.nodes.extract 0 (request.nodes.size / 2) } maxChars
+  else if request.transitions.size > 1 then
+    plannerRequestTextCapped { request with transitions := request.transitions.extract 0 (request.transitions.size / 2) } maxChars
+  else if request.regions.size > 1 then
+    plannerRequestTextCapped { request with regions := request.regions.extract 0 (request.regions.size / 2) } maxChars
+  else if request.root.goal.length > 64 then
+    plannerRequestTextCapped { request with root := { request.root with
+      goal := (request.root.goal.take (request.root.goal.length / 2)).toString } } maxChars
+  else if maxChars >= 2 then "{}" else ""
+
+private def jsonFloat (json : Json) (field : String) (fallback : Float) : Float :=
+  match json.getObjVal? field with
+  | .ok value => clamp01 ((fromJson? value : Except String Float).toOption.getD fallback)
+  | .error _ => fallback
+
+def parsePlannerResponse (text : String) (maxItems : Nat := 64) : Except String PlannerResponseV2 := do
+  let json ← Json.parse text.trimAscii.toString
+  let rootValue := jsonFloat json "root_value" 0.5
+  let confidence := jsonFloat json "confidence" 0.5
+  let mut preferredRegions : Array PlannerRegionScore := #[]
+  if let .ok value := json.getObjVal? "preferred_regions" then
+    if let .ok items := value.getArr? then
+      for item in items.take maxItems do
+        if let .ok idJson := item.getObjVal? "id" then
+          if let .ok id := idJson.getStr? then
+            preferredRegions := preferredRegions.push { id, score := jsonFloat item "score" 0.5 }
+  let mut transitionScores : Array PlannerTransitionScore := #[]
+  if let .ok value := json.getObjVal? "transition_scores" then
+    if let .ok items := value.getArr? then
+      for item in items.take maxItems do
+        if let .ok idJson := item.getObjVal? "id" then
+          if let .ok id := idJson.getStr? then
+            transitionScores := transitionScores.push {
+              id, policy := jsonFloat item "policy" 0.5
+              value := jsonFloat item "value" 0.5
+              confidence := jsonFloat item "confidence" confidence }
+  let strategy : StrategyPlan := match json.getObjVal? "strategy" with
+    | .ok value => {
+        primaryFamily? := (value.getObjVal? "primary_family").toOption.bind (·.getStr?.toOption)
+        objective? := (value.getObjVal? "objective").toOption.bind (·.getStr?.toOption) }
+    | .error _ => ({} : StrategyPlan)
+  let mut expansionRequests : Array ExpansionRequest := #[]
+  if let .ok value := json.getObjVal? "expansion_requests" then
+    if let .ok items := value.getArr? then
+      for item in items.take maxItems do
+        if let .ok idJson := item.getObjVal? "region_id" then
+          if let .ok regionId := idJson.getStr? then
+            let extraDepth := (item.getObjVal? "extra_depth").toOption.bind fun v =>
+              (fromJson? v : Except String Nat).toOption
+            let family? := (item.getObjVal? "family").toOption.bind (·.getStr?.toOption)
+            expansionRequests := expansionRequests.push {
+              regionId, extraDepth := extraDepth.getD 0, family? }
+  let mut thoughts : Array PlannerThoughtView := #[]
+  if let .ok value := json.getObjVal? "thoughts" then
+    if let .ok items := value.getArr? then
+      for item in items.take maxItems do
+        let id? := (item.getObjVal? "id").toOption.bind (·.getStr?.toOption)
+        let kind? := (item.getObjVal? "kind").toOption.bind (·.getStr?.toOption)
+        let ref? := (item.getObjVal? "expression_ref").toOption.bind (·.getStr?.toOption)
+        if let (some id, some kind, some expressionRef) := (id?, kind?, ref?) then
+          let dependencies := (item.getObjVal? "dependencies").toOption.bind
+            (·.getArr?.toOption) |>.map (·.filterMap (·.getStr?.toOption)) |>.getD #[]
+          thoughts := thoughts.push { id, kind, expressionRef, dependencies }
+  let mut leanCandidates : Array String := #[]
+  if let .ok value := json.getObjVal? "lean_candidates" then
+    if let .ok items := value.getArr? then
+      for item in items.take maxItems do
+        let code? := match item.getStr? with
+          | .ok code => some code
+          | .error _ => (item.getObjVal? "code").toOption.bind (·.getStr?.toOption)
+        if let some code := code? then
+          unless code.trimAscii.isEmpty do leanCandidates := leanCandidates.push code
+  return {
+    rootValue := rootValue
+    confidence := confidence
+    preferredRegions := preferredRegions
+    transitionScores := transitionScores
+    strategy := strategy
+    expansionRequests := expansionRequests
+    thoughts := thoughts
+    leanCandidates := leanCandidates
+  }
+
 private def parseActionId (json : Json) : Except String UInt64 := do
   let idJson ← json.getObjVal? "id"
   let idText ← idJson.getStr?

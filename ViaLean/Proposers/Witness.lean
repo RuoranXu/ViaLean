@@ -14,6 +14,7 @@ def witnessProposals (goal : GoalSnapshot) (cfg : ProposeConfig) : MetaM (Array 
         result := result.push {
           kind := .witness
           payload := .witness witness
+          origin := .local
           source := "local"
           prior := 0.85
           estimatedCost := 1.0

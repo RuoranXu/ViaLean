@@ -14,6 +14,7 @@ def equalityProposals (goal : GoalSnapshot) (cfg : ProposeConfig) : MetaM (Array
         result := result.push {
           kind := .equalityMid
           payload := .equalityMid mid
+          origin := .local
           source := "local"
           prior := 0.8
           estimatedCost := 2.0
@@ -26,6 +27,7 @@ def equalityProposals (goal : GoalSnapshot) (cfg : ProposeConfig) : MetaM (Array
           result := result.push {
             kind := .equalityMid
             payload := .equalityMid mid
+            origin := .local
             source := "local-equality"
             prior := 0.9
             estimatedCost := 2.0

@@ -9,92 +9,18 @@ import ViaLean.Proposers.Iff
 import ViaLean.Scheduler.UCB
 import ViaLean.Scheduler.PersistentStats
 import ViaLean.Model.Guidance
+import ViaLean.Solver.Router
+import ViaLean.Workspace
+import ViaLean.Synthesis.Local
+import ViaLean.Planner.Guidance
+import ViaLean.Search.State
+import ViaLean.Search.ModelCode
 import Lean.Elab.Tactic.Meta
 import Lean.Parser
 
 open Lean Meta
 
 namespace ViaLean
-
-structure SolveStats where
-  directAttempts   : Nat := 0
-  proposalAttempts : Nat := 0
-  bridgeDepth      : Nat := 0
-  elapsedMs        : Nat := 0
-  winningFamily?   : Option ProposalFamily := none
-deriving Inhabited
-
-inductive SolveResult
-  | solved (proof : Expr) (stats : SolveStats)
-  | failed (stats : SolveStats)
-
-structure SearchState where
-  config : ProposeConfig
-  budget : Budget
-  scheduler : SchedulerState
-  guidanceCache : IO.Ref (Std.HashMap UInt64 (Option ModelGuidance))
-  feedback : IO.Ref (Array SearchFeedback)
-  stats : IO.Ref SolveStats
-  path   : SearchPath := {}
-  maxLeafSec? : Option Nat := none
-  modelEnabled : Bool := true
-
-private structure ModelCodeAttempt where
-  proof?  : Option Expr := none
-  outcome : String := "failed"
-  detail  : String := ""
-
-private def boundedText (limit : Nat) (text : String) : String :=
-  if text.length ≤ limit then text else (text.take limit).toString ++ "…"
-
-private def forbiddenModelSyntaxKind (kind : Name) : Bool :=
-  let name := kind.toString.toLower
-  name.contains "runtac" ||
-  name.contains "run_tac" ||
-  name.contains "eval" ||
-  name.contains "native" ||
-  name.contains "setoption" ||
-  name.contains "set_option" ||
-  name.contains "sleep" ||
-  name.contains "command" ||
-  name.contains "syntaxquotation" ||
-  name.contains "macro"
-
-private def allowedModelSyntaxKind (kind : Name) : Bool :=
-  let name := kind.toString
-  kind.isAnonymous ||
-  name == "null" ||
-  name == "group" ||
-  name == "num" ||
-  name == "scientific" ||
-  name == "str" ||
-  name == "char" ||
-  name.startsWith "Lean.Parser.Tactic." ||
-  name.startsWith "Lean.Parser.Term."
-
-private partial def validateModelSyntax (stx : Syntax) : Except String Unit := do
-  match stx with
-  | .missing | .atom .. | .ident .. => pure ()
-  | .node _ kind args =>
-      if forbiddenModelSyntaxKind kind then
-        throw s!"unsafe Lean syntax is not permitted for model code: {kind}"
-      unless allowedModelSyntaxKind kind do
-        throw s!"unsupported non-core syntax in model code: {kind}"
-      for arg in args do validateModelSyntax arg
-
-/-- Parse external model text as a core Lean tactic sequence after rejecting executable
-metaprogramming, commands, resource-option overrides, and non-core syntax extensions. -/
-def parseSafeModelTactic (env : Environment) (code : String) : Except String Syntax := do
-  let wrapped := if code.startsWith "by" then code else "by\n  " ++ code
-  let term ← Parser.runParserCategory env `term wrapped
-  validateModelSyntax term
-  match term with
-  | .node _ kind args =>
-      unless kind.toString == "Lean.Parser.Term.byTactic" do
-        throw "model Lean code must be a by-proof or a tactic sequence"
-      let some tactics := args[1]? | throw "malformed by-proof"
-      return tactics
-  | _ => throw "model Lean code must be a by-proof or a tactic sequence"
 
 private def describeOpenGoals
     (goals : Array MVarId) (state : SearchState) : MetaM String := do
@@ -159,10 +85,14 @@ private def directProof?
     (goal : MVarId) (state : SearchState) (requestedSec : Nat) : MetaM (Option Expr) := do
   let seconds ← availableSec state requestedSec
   if seconds = 0 then return none
-  let attempt ← solveWithNative goal state.config (seconds * 1000)
+  let attempt ← state.router.solve {
+    goal
+    budgetMs := seconds * 1000
+    wantDiagnostics := state.config.trace
+  }
   if state.config.trace then
     trace[ViaLean.native]
-      "solved={attempt.proof?.isSome}, nodes={attempt.stats.nodes}, elapsedMs={attempt.elapsedMs}"
+      "backend={repr attempt.backend}, solved={attempt.proof?.isSome}, elapsedMs={attempt.elapsedMs}, diagnostics={attempt.diagnostics?}"
   return attempt.proof?
 
 private def cheapClose? (snap : GoalSnapshot) : MetaM (Option Expr) := do
@@ -182,11 +112,11 @@ private def orderActions
   let stats ← state.scheduler.snapshot
   let total := stats.fold (init := 0) fun total _ family => total + family.attempts
   let baseScore (action : ProofAction) :=
-    if state.config.deterministic || !state.config.ucb then action.prior
-    else
+    if state.config.rankingMode == .ucb || state.config.rankingMode == .hybrid then
       let familyStats := (stats.get? action.family).getD {}
       ucbScore familyStats total action.prior
         state.config.ucbExploration state.config.ucbPriorWeight
+    else action.prior
   let score (action : ProofAction) :=
     let base := baseScore action
     let actionSignal? := guidance?.bind fun guidance =>
@@ -196,7 +126,10 @@ private def orderActions
       | none => guidance?.map (·.value)
     let blended := ModelProtocol.blendScore base signal? state.config.modelWeight
     blended / max 0.1 action.estimatedCost
-  return actions.insertionSort fun a b => score a > score b
+  return actions.insertionSort fun a b =>
+    if score a == score b then
+      if state.config.stableTieBreak then false else a.fingerprint < b.fingerprint
+    else score a > score b
 
 private def collectActions
     (snap : GoalSnapshot) (state : SearchState) : MetaM (Array ProofAction) := do
@@ -219,10 +152,12 @@ private def collectActions
     actions := actions ++ (← localCutProposals snap cfg).map Proposal.compile
   if (← state.budget.remainingMs) = 0 then return actions
   if cfg.library then
-    let premises ← libraryPremiseProvider.retrieve snap cfg.maxCandidates
+    let premiseLimit := if cfg.maxRetrievedPremises = 0 then cfg.maxCandidates
+      else cfg.maxRetrievedPremises
+    let premises ← libraryPremiseProvider.retrieve snap premiseLimit
     if (← state.budget.remainingMs) > 0 then
       actions := actions ++ (← libraryCutProposals snap cfg premises).map Proposal.compile
-  return actions
+  return actions.extract 0 (min actions.size cfg.maxActionsPerNode)
 
 private def modelMode (state : SearchState) : String :=
   state.config.modelMode.trimAscii.toString.toLower
@@ -239,12 +174,49 @@ private def feedbackWindow (state : SearchState) : MetaM (Array SearchFeedback) 
   if limit = 0 then return #[]
   let start := events.size - min events.size limit
   return events.extract start events.size
+
+private structure NeuralStep where
+  guidance? : Option ModelGuidance := none
+  novelActions : Array ProofAction := #[]
+  leanCandidates : Array String := #[]
+
 private def guidanceFor?
     (snap : GoalSnapshot) (actions : Array ProofAction)
-    (state : SearchState) (depth : Nat) : MetaM (Option ModelGuidance) := do
-  if !state.config.ai || !state.modelEnabled || modelMode state != "policy" || actions.isEmpty then return none
+    (state : SearchState) (depth : Nat) : MetaM NeuralStep := do
+  if !state.config.ai || !state.modelEnabled then return {}
+  let mode := modelMode state
+  unless mode == "policy" || mode == "planner" do return {}
+  if mode == "policy" && actions.isEmpty then return {}
+  let workspaceVersion := (← state.workspace.get).version
+  let cachedVersion? := (← state.plannerVersions.get).get? snap.fingerprint
   if let some cached := (← state.guidanceCache.get).get? snap.fingerprint then
-    return cached
+    let versionGain := cachedVersion?.map fun previous =>
+      if workspaceVersion <= previous then 0.0
+      else Float.ofNat (workspaceVersion - previous) / Float.ofNat (max 1 workspaceVersion)
+    if mode == "policy" || cachedVersion? == some workspaceVersion ||
+        versionGain.any (· < state.config.plannerMinReplanGain) then
+      return { guidance? := cached }
+  if mode == "planner" then
+    if (← state.plannerCalls.get) >= state.config.plannerMaxCalls then return {}
+    state.plannerCalls.modify (· + 1)
+    let result ← PlannerEngine.query? state.workspace snap state.config state.budget
+    let step ← match result with
+      | .ok decision =>
+        if state.config.trace then
+          trace[ViaLean.model]
+            "planner depth={depth}, value={decision.guidance.value}, scored={decision.guidance.actionScores.size}, novel={decision.novelActions.size}, code={decision.leanCandidates.size}, expansions={decision.expansionRequests.size}"
+        let decisionStep : NeuralStep := {
+          guidance? := some decision.guidance
+          novelActions := decision.novelActions
+          leanCandidates := decision.leanCandidates
+        }
+        pure decisionStep
+      | .error error =>
+        if state.config.trace then trace[ViaLean.model] "fallback: {error}"
+        pure {}
+    state.guidanceCache.modify (·.insert snap.fingerprint step.guidance?)
+    state.plannerVersions.modify (·.insert snap.fingerprint workspaceVersion)
+    return step
   let result ← ModelGuidanceEngine.query? snap actions depth state.config state.budget
   let guidance? ← match result with
     | .ok guidance =>
@@ -256,7 +228,7 @@ private def guidanceFor?
         if state.config.trace then trace[ViaLean.model] "fallback: {error}"
         pure none
   state.guidanceCache.modify (·.insert snap.fingerprint guidance?)
-  return guidance?
+  return { guidance? }
 
 mutual
   partial def solveGoal?
@@ -267,10 +239,24 @@ mutual
       noteDepth state depth
       let snap ← snapshot goal
       if (← state.budget.remainingMs) = 0 then return none
-      if state.path.goalFingerprints.contains snap.fingerprint then return none
+      if state.path.goalKeys.contains snap.key then return none
+      let nodeId? ← Workspace.observeGoal state.workspace state.config snap depth state.activeTransition?
       let state := { state with
         path := { state.path with
-          goalFingerprints := state.path.goalFingerprints.insert snap.fingerprint } }
+          goalKeys := state.path.goalKeys.insert snap.key } }
+
+      let synthesized ← LocalSynthesizer.synthesize snap state.config.maxActionsPerNode
+      if let some nodeId := nodeId? then
+        let complete := synthesized.foldl (init := 0) fun n candidate =>
+          n + if candidate.complete then 1 else 0
+        Workspace.setSynthesisSignals state.workspace nodeId {
+          exactLocal := complete > 0
+          completeInhabitants := complete
+          partialInhabitants := synthesized.size - complete
+        }
+      if let some proof := LocalSynthesizer.firstComplete? synthesized then
+        if depth = 0 then noteWinner state .direct
+        return some (← finalizeProof snap.target proof)
 
       if let some proof ← cheapClose? snap then
         if depth = 0 then noteWinner state .direct
@@ -281,12 +267,21 @@ mutual
           tryProofAction? snap nativeCloseAction state depth then
         return some proof
 
-      let actions ← collectActions snap state
+      let baseActions ← collectActions snap state
       if state.modelEnabled && modelMode state == "interactive" then
-        if let some proof ← observingMeta? <| tryInteractive? snap actions state depth then
+        if let some proof ← observingMeta? <| tryInteractive? snap baseActions state depth then
           return some proof
-      let guidance? ← guidanceFor? snap actions state depth
-      let actions ← orderActions state guidance? actions
+      let neural ← guidanceFor? snap baseActions state depth
+      let actions := neural.novelActions.foldl (init := baseActions) fun actions action =>
+        if actions.any (·.fingerprint == action.fingerprint) then actions else actions.push action
+      if let some nodeId := nodeId? then
+        Workspace.offerActions state.workspace state.config nodeId actions
+      if state.config.modelLeanCode && state.config.experimentalRawLeanCode &&
+          modelMode state == "planner" then
+        for code in neural.leanCandidates.take state.config.modelMaxCodeCandidates do
+          if let some proof := (← tryModelLeanCandidate? snap code state depth).proof? then
+            return some proof
+      let actions ← orderActions state neural.guidance? actions
       for action in actions do
         unless action.family == .structural do
           unless ← hasSpeculativeBudget state do continue
@@ -345,6 +340,10 @@ mutual
       trace[ViaLean.proposal]
         "try kind={repr proposal.kind}, source={proposal.source}, depth={depth}"
     match proposal.payload with
+    | .directTerm term =>
+      let termType ← inferType term
+      unless ← isDefEq termType snap.target do return none
+      return some (← finalizeProof snap.target term)
     | .equalityMid mid =>
       let some (_, lhs, rhs) := eqTarget? snap.target | return none
       let leftTarget ← mkEq lhs mid
@@ -512,7 +511,7 @@ mutual
         trace[ViaLean.model]
           "interactive round={round}, frontier={frontier.size}, feedback={feedback.size}, code={continuation.leanCandidates.size}, selections={continuation.selections.size}"
       let mut madeProgress := false
-      if state.config.modelLeanCode then
+      if state.config.modelLeanCode && state.config.experimentalRawLeanCode then
         let candidateLimit := min continuation.leanCandidates.size
           state.config.modelMaxCodeCandidates
         for index in [0:candidateLimit] do
@@ -591,13 +590,17 @@ mutual
     if (← state.budget.remainingMs) = 0 then return none
     noteAttempt state action
     let started ← IO.monoMsNow
+    let transition? ← Workspace.beginAction state.workspace state.config snap action
+    let execState := { state with activeTransition? := transition? }
     let result ← match action.payload with
-      | .close .native => directProof? snap.goalId state state.config.directProbeSec
+      | .close .native => directProof? snap.goalId execState state.config.directProbeSec
       | .close _ => pure none
-      | .structural _ => tryStructural? snap state depth
-      | .proposal proposal => tryProposal? snap proposal state depth
+      | .structural _ => tryStructural? snap execState depth
+      | .proposal proposal => tryProposal? snap proposal execState depth
       | .sketch _ => pure none
     let elapsedMs := (← IO.monoMsNow) - started
+    Workspace.finishAction state.workspace transition?
+      (if result.isSome then .solved else .failed) elapsedMs
     state.scheduler.record action.family (if result.isSome then 1.0 else 0.0)
     if depth = 0 && result.isSome then noteWinner state action.family
     if modelMode state == "interactive" then
@@ -682,9 +685,23 @@ def runSearch (goal : MVarId) (config : ProposeConfig) : MetaM SolveResult := do
   let guidanceCache ← IO.mkRef {}
   let feedback ← IO.mkRef #[]
   let statsRef ← IO.mkRef ({} : SolveStats)
+  let workspace ← IO.mkRef ({} : ProofWorkspace)
+  let plannerVersions ← IO.mkRef {}
+  let plannerCalls ← IO.mkRef 0
+  let state : SearchState := {
+    config := config
+    budget := budget
+    scheduler := scheduler
+    guidanceCache := guidanceCache
+    feedback := feedback
+    stats := statsRef
+    router := .nativeOnly config
+    workspace := workspace
+    plannerVersions := plannerVersions
+    plannerCalls := plannerCalls
+  }
   let proof?? ← withinBudget? budget do
-    let proof? ← solveGoal? goal
-      { config, budget, scheduler, guidanceCache, feedback, stats := statsRef } 0
+    let proof? ← solveGoal? goal state 0
     match proof? with
     | some proof => return some (← finalizeProof (← goal.getType) proof)
     | none => return none
@@ -705,10 +722,24 @@ def runManualProposal
     let guidanceCache ← IO.mkRef {}
     let feedback ← IO.mkRef #[]
     let stats ← IO.mkRef ({} : SolveStats)
+    let workspace ← IO.mkRef ({} : ProofWorkspace)
+    let plannerVersions ← IO.mkRef {}
+    let plannerCalls ← IO.mkRef 0
+    let state : SearchState := {
+      config := config
+      budget := budget
+      scheduler := scheduler
+      guidanceCache := guidanceCache
+      feedback := feedback
+      stats := stats
+      router := .nativeOnly config
+      workspace := workspace
+      plannerVersions := plannerVersions
+      plannerCalls := plannerCalls
+    }
     let proof?? ← withinBudget? budget do
       let snap ← snapshot goal
-      tryProofAction? snap proposal.compile
-        { config, budget, scheduler, guidanceCache, feedback, stats } 0
+      tryProofAction? snap proposal.compile state 0
     persistScheduler config budget scheduler
     return proof??.join
 
@@ -731,7 +762,22 @@ def diagnose (goal : MVarId) (config : ProposeConfig) : MetaM MessageData := goa
       let guidanceCache ← IO.mkRef {}
       let feedback ← IO.mkRef #[]
       let stats ← IO.mkRef ({} : SolveStats)
-      directProof? goal { config, budget, scheduler, guidanceCache, feedback, stats } config.directProbeSec
+      let workspace ← IO.mkRef ({} : ProofWorkspace)
+      let plannerVersions ← IO.mkRef {}
+      let plannerCalls ← IO.mkRef 0
+      let state : SearchState := {
+        config := config
+        budget := budget
+        scheduler := scheduler
+        guidanceCache := guidanceCache
+        feedback := feedback
+        stats := stats
+        router := .nativeOnly config
+        workspace := workspace
+        plannerVersions := plannerVersions
+        plannerCalls := plannerCalls
+      }
+      directProof? goal state config.directProbeSec
     return m!"ViaLean: shape={repr snap.shape}, direct={direct.isSome}, " ++
       m!"equality={equalities.size}, witness={witnesses.size}, cuts={cuts.size}, " ++
       m!"frontier={frontier.size} [{perspectives}]"

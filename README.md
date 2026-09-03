@@ -1,6 +1,6 @@
 # ViaLean
 
-ViaLean is an independent, kernel-checked proof-search engine implemented in Lean 4. It combines bounded native transformations, a diversity-balanced symbolic frontier, compositional proof actions, and optional external-model guidance while keeping Lean's kernel as the only proof authority.
+ViaLean is an independent, kernel-checked persistent neural-symbolic co-search engine implemented in Lean 4. Lean continuously builds and verifies a bounded proof workspace; a model can plan over that graph, create typed intermediate bridges, or (in an explicit experimental mode) propose Lean code. Lean's kernel remains the only proof authority.
 
 ## Design
 
@@ -8,13 +8,21 @@ The default search path is offline and has no external theorem prover, native ex
 
 The project-owned pipeline provides:
 
-1. bounded goal snapshots, fingerprints, budgets, and AND/OR branch control;
+1. strict alpha-stable `GoalKey`s that include let values, collision-confirmed transpositions, explicit work/render/deadline budgets, and AND/OR branch control;
 2. structural, equality, equivalence, witness, local-cut, and theorem-name-preserving retrieved-premise application;
 3. native contradiction closing, simplification, rewriting, case analysis, introductions, constructors, and premise application;
-4. a finite symbolic frontier containing heterogeneous probes plus a bounded multi-step future graph, rather than many long rollouts;
-5. cost-aware stable/UCB scheduling, optional aggregate scheduler persistence, populated solve statistics, and final proof validation.
+4. a versioned Proof Workspace/Atlas whose executable transitions and recursive child goals form a deduplicated graph, plus coarse strategy regions for model planning;
+5. an ubiquitous LocalSynthesizer that records multiple complete inhabitants and partial local applications at every visited goal;
+6. a finite, work-bounded symbolic burst containing heterogeneous probes and diverse multi-step local futures, rather than many long rollouts;
+7. cost-aware prior/UCB/planner/hybrid scheduling, a real leaf-solver router, optional aggregate persistence, populated solve statistics, and final proof validation.
 
-## Symbolic frontier atlas
+## Persistent proof workspace
+
+Every visited goal is interned by strict semantic identity. Each offered or executed action becomes a typed `SymbolicTransitionCandidate`; recursive subgoals are linked back to that transition, repeated states merge, outcomes become structured observations, and Workspace versions drive event-based replanning. Model-created objects remain `speculative` until their own validation/execution succeeds; failed objects are isolated rather than invalidating a whole thought batch.
+
+The model sees compressed regions, representative nodes, executable transition IDs, costs, qualitative signals and structured outcomes—not internal `Expr`, `FVarId`, or replay handles. Planner serialization degrades deterministically and is checked again against `plannerMaxPayloadChars` after final JSON generation.
+
+## Symbolic burst / compatibility frontier
 
 In interactive mode, ViaLean computes the atlas once per unresolved node and reuses it across model rounds. Alongside the one-layer executable probes, a `future-graph` probe expands a small width/depth-bounded tree of intro, simplification, backward application, construction, elimination, and bidirectional rewrite paths. Every future node includes its full bounded local context, target, path, depth, and qualitative opportunities such as exact closure, rewrite sources, constructors, or backward premises.
 
@@ -32,16 +40,17 @@ Independent quotas preserve diversity across:
 
 Each probe exposes rendered goals, derived facts, or future paths, never a scalar progress score. Every branch rendering keeps its target and bounded newest-first local context. Executable probes can be selected by `probe_id` or `probe_index`. ViaLean replays the selected transform on a fresh goal, disables nested model calls, recursively solves only the exposed obligations, and either extracts a kernel-checkable proof or rolls the whole branch back. Observation-only forward/future views remain guidance and cannot pretend to be proof steps.
 
-The atlas is bounded by global probe count, per-perspective quota, children per probe, facts, forward depth, rendered characters, and the shared proof-search deadline. This concentrates diverse information in a few forward steps instead of spending the budget on many rollouts.
+Output (`frontierMaxProbes`) and exploration work (`atlasMaxMetaOps`) are separate. Producer work is fairly partitioned across nine strategy families before round-robin output selection; a prolific local-apply family cannot consume the cases/rewrite/constructor share. This concentrates diverse information in a few forward steps instead of spending the budget on many rollouts.
 
 ## External model modes
 
 ViaLean supports local command adapters, OpenAI-compatible APIs, Ollama/llama.cpp endpoints, and deterministic replay.
 
-- `modelMode := "policy"` asks for value/action scores and mixes them with ViaLean's priors.
-- `modelMode := "interactive"` accepts no score. Each round may submit several Lean `by ...`/tactic candidates and may optionally select an existing action or executable frontier probe. A complete model tactic can close the goal; a partial tactic exposes obligations that ordinary symbolic search continues under the shared deadline. The next round receives errors, open goals, their deep future paths, and action/probe outcomes.
+- `modelMode := "planner"` uses `vialean.planner.v2`: policy/value/confidence over Atlas transitions, region strategy, bounded expansion requests, typed conjecture batches, and optional Lean candidates. A typed `expression_ref` may introduce a validated equality/iff bridge, witness, helper cut, or exact term even when the corresponding enumerative proposer is disabled.
+- `modelMode := "policy"` keeps the v1 value/action-scoring compatibility path.
+- `modelMode := "interactive"` keeps dense non-scoring feedback and finite symbolic futures. It may select existing actions/probes and, when explicitly enabled, submit complete or partial Lean tactics.
 
-Model tactic text is untrusted. ViaLean accepts only a validated core Lean proof-tactic syntax tree, rejects commands, `run_tac`, evaluation/native execution, option overrides, macros, and non-core tactic extensions, and runs it with an independent heartbeat limit on a fresh goal. Failed candidates restore metavariable state; all successful results still pass the no-`sorry`, no-metavariable final proof boundary. Provider output is bounded while streamed, and over-limit processes are terminated.
+Raw model tactic text is untrusted and disabled by default. It runs only when both `modelLeanCode` and `experimentalRawLeanCode` are true. ViaLean accepts an exact allowlist of reviewed core syntax kinds, rejects commands, `run_tac`, evaluation/native execution, option overrides, macros and extensions, and runs accepted code with an independent heartbeat limit on a fresh goal. Failed candidates restore metavariable state; every successful result still passes the no-`sorry`, no-metavariable final boundary. Provider output is bounded while streamed, and over-limit processes are terminated.
 
 See [Model guidance](docs/MODEL_GUIDANCE.md) for both protocols, or [model_adapter.py](examples/model_adapter.py) for a zero-dependency adapter.
 
@@ -56,7 +65,7 @@ propose via_cut proposition
 propose via_witness term
 ```
 
-Core frontier fields are `frontier`, `frontierMaxProbes`, `frontierMaxPerPerspective`, `frontierMaxChildren`, `frontierMaxFacts`, `frontierForwardDepth`, `frontierFutureDepth`, `frontierFutureWidth`, `frontierFutureNodes`, and `frontierContextChars`. Model-code bounds are `modelLeanCode`, `modelMaxCodeCandidates`, `modelMaxCodeChars`, and `modelCodeMaxHeartbeats`. Native and controller bounds include `timeoutSec`, `maxDepth`, `nativeMaxDepth`, `nativeMaxApplications`, and `nativeMaxCaseBranches`.
+Core Atlas bounds are `atlasMaxNodes`, `atlasMaxTransitions`, `atlasMaxWorkUnits`, `atlasMaxMetaOps`, `atlasMaxRenderedChars`, and `atlasMaxRegions`. `maxRetrievedPremises` and `maxActionsPerNode` have distinct meanings. `rankingMode` is one of `.prior`, `.ucb`, `.planner`, or `.hybrid`. Planner bounds include `plannerMaxPayloadChars` and `plannerMaxCalls`; raw code additionally requires `experimentalRawLeanCode := true`.
 
 ## Build and test
 

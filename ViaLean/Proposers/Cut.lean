@@ -11,6 +11,7 @@ private def addCut?
   return result.push {
     kind := .cut
     payload := .cutType cut
+    origin := .local
     source := "local"
     prior := 0.7
     estimatedCost := 2.0

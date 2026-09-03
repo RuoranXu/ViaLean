@@ -10,3 +10,4 @@ import ViaLeanTest.Model
 import ViaLeanTest.NativeTransforms
 import ViaLeanTest.Frontier
 import ViaLeanTest.Integration
+import ViaLeanTest.V3Core

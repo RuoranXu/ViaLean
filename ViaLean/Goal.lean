@@ -1,4 +1,4 @@
-import ViaLean.Basic
+import ViaLean.GoalKey
 
 open Lean Meta
 
@@ -14,6 +14,7 @@ structure LocalInfo where
   userName : Name
   type     : Expr
   isLet    : Bool := false
+  value?   : Option Expr := none
 
 structure GoalSnapshot where
   goalId      : MVarId
@@ -22,6 +23,7 @@ structure GoalSnapshot where
   targetSize  : Nat
   localCount  : Nat
   shape       : GoalShape
+  key         : GoalKey
   fingerprint : UInt64
 
 def classifyTarget (target : Expr) : MetaM GoalShape := do
@@ -50,8 +52,9 @@ def snapshot (goal : MVarId) : MetaM GoalSnapshot := goal.withContext do
         userName := decl.userName
         type := ← instantiateMVars decl.type
         isLet := decl.isLet
+        value? := ← decl.value? (allowNondep := true).mapM instantiateMVars
       }
-  let fingerprint := locals.foldl (fun acc info => hash (acc, hash info.type)) (hash target)
+  let key ← mkGoalKey goal
   pure {
     goalId := goal
     target
@@ -59,7 +62,8 @@ def snapshot (goal : MVarId) : MetaM GoalSnapshot := goal.withContext do
     targetSize := exprSize target
     localCount := locals.size
     shape := ← classifyTarget target
-    fingerprint
+    key
+    fingerprint := key.bucket
   }
 
 end ViaLean

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal command adapter for both ViaLean model protocols.
+"""Minimal command adapter for ViaLean policy, interactive, and planner protocols.
 
 Replace score_actions() / continue_search() with a local runtime or API call. The
 transport uses only Python's standard library and keeps stdout JSON-only.
@@ -62,13 +62,36 @@ def continue_search(request: dict[str, Any]) -> dict[str, Any]:
     return {"continue": [], "rationale": "all executable probes and actions were attempted"}
 
 
+def plan_atlas(request: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic planner-v2 example; replace with one batched model inference."""
+    family_bonus = {"equality": 0.9, "witness": 0.86, "structural": 0.8, "cut": 0.72}
+    scores = []
+    for transition in request.get("transitions", []):
+        score = family_bonus.get(transition.get("family"), 0.5)
+        scores.append({
+            "id": str(transition["id"]),
+            "policy": score,
+            "value": score,
+            "confidence": 0.7,
+        })
+    return {
+        "root_value": max((item["value"] for item in scores), default=0.5),
+        "confidence": 0.7,
+        "transition_scores": scores,
+        "strategy": {"objective": "prefer a bounded, structurally promising Atlas region"},
+        "thoughts": [],
+    }
+
+
 def main() -> None:
     request = json.load(sys.stdin)
-    protocol = request.get("protocol")
+    protocol = request.get("protocol") or request.get("version")
     if protocol == "vialean.guidance.v1":
         response = score_actions(request)
     elif protocol == "vialean.interactive.v1":
         response = continue_search(request)
+    elif protocol == "vialean.planner.v2":
+        response = plan_atlas(request)
     else:
         raise ValueError("unsupported ViaLean protocol")
     json.dump(response, sys.stdout, separators=(",", ":"))

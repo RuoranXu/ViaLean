@@ -12,7 +12,18 @@ inductive ProposalKind
   | direct | cut | equalityMid | iffMid | witness | structural | rewrite | external
 deriving BEq, Hashable, Repr, Inhabited
 
+inductive ProposalOrigin
+  | local
+  | library (name : Name)
+  | external
+  | normalization
+  | derived
+  | planner
+  | manual
+deriving BEq, Hashable, Repr, Inhabited
+
 inductive ProposalPayload
+  | directTerm (term : Expr)
   | cutType (type : Expr)
   | libraryApply (theoremName : Name)
   | equalityMid (mid : Expr)
@@ -24,6 +35,7 @@ deriving Inhabited
 structure Proposal where
   kind          : ProposalKind
   payload       : ProposalPayload
+  origin        : ProposalOrigin := .derived
   source        : String
   prior         : Float := 0.5
   estimatedCost : Float := 1.0

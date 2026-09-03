@@ -13,6 +13,7 @@ def iffProposals (goal : GoalSnapshot) (cfg : ProposeConfig) : MetaM (Array Prop
           result := result.push {
             kind := .iffMid
             payload := .iffMid mid
+            origin := .local
             source := "local-iff"
             prior := 0.85
             estimatedCost := 2.0

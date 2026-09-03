@@ -13,6 +13,7 @@ def structuralProposals (goal : GoalSnapshot) (_cfg : ProposeConfig) : Array Pro
   | some rule => #[{
       kind := .structural
       payload := .structural rule
+      origin := .derived
       source := "structural"
       prior := 1.0
       estimatedCost := 1.0

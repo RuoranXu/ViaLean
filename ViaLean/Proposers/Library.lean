@@ -16,6 +16,7 @@ def libraryCutProposals
         result := result.push {
           kind := .cut
           payload := .libraryApply premise.name
+          origin := .library premise.name
           source := s!"library:{premise.name}"
           prior := min 1.0 (0.4 + premise.score * 0.4)
           estimatedCost := 2.5

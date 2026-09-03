@@ -1,6 +1,29 @@
 # Model guidance
 
-ViaLean exposes two bounded, untrusted model modes. Policy mode only scores objects already constructed by ViaLean. Interactive mode can additionally propose validated core Lean `by ...`/tactic scripts; it never accepts declarations, commands, shell text, arbitrary metaprograms, or unchecked proofs.
+ViaLean exposes three bounded, untrusted model modes. Planner v2 is the primary persistent co-search protocol, policy v1 is a scoring compatibility path, and interactive v1 provides dense finite-lookahead feedback. None can return an unchecked proof.
+
+## Planner v2: graph planning and candidate creation
+
+`modelMode := "planner"` sends a compressed view of the versioned Proof Atlas: remaining budgets, root, coarse strategy regions, representative nodes, typed executable transitions, and structured observations. It calls the model again only after the Workspace version changes and never beyond `plannerMaxCalls`.
+
+The response may combine transition policy/value/confidence, a region strategy, bounded expansion requests, typed thoughts, and optional Lean candidates:
+
+```json
+{
+  "root_value": 0.82,
+  "confidence": 0.74,
+  "transition_scores": [{"id":"13", "policy":0.88, "value":0.91}],
+  "strategy": {"primary_family":"equality", "objective":"join the local chain"},
+  "thoughts": [
+    {"id":"bridge-b", "kind":"equality_bridge", "expression_ref":"b", "dependencies":[]}
+  ],
+  "lean_candidates": [{"code":"by ..."}]
+}
+```
+
+Typed thoughts can be `direct_term`/`exact`, `equality_bridge`, `iff_bridge`, `witness`/`intermediate_value`, or `helper_lemma`/`cut`. `expression_ref` names an existing local or environment constant; Lean resolves and validates every thought independently before adding its action to the Workspace. Invalid siblings do not discard valid thoughts. Lean candidates use the same experimental sandbox as interactive mode and are ignored unless raw code is explicitly enabled.
+
+The fully serialized request—not merely its components—is hard-capped by `plannerMaxPayloadChars`. Compression drops old observations, non-representative nodes/transitions and long goal text in that order while retaining valid JSON.
 
 ## Interactive mode: diverse finite lookahead
 
@@ -14,6 +37,7 @@ propose
   (modelEndpoint := "http://127.0.0.1:8080/v1/chat/completions")
   (modelName := "local-model")
   (modelMaxRounds := 4)
+  (experimentalRawLeanCode := true)
   (frontierMaxProbes := 32)
   (frontierForwardDepth := 2)
   (frontierFutureDepth := 3)
@@ -196,12 +220,15 @@ The optional key is read from the environment variable named by `modelApiKeyEnv`
 | Field | Default | Meaning |
 |---|---:|---|
 | `ai` | `false` | Enable model queries. |
-| `modelMode` | `"policy"` | Scored `policy` or non-scoring `interactive`. |
+| `modelMode` | `"policy"` | `planner`, scored `policy`, or non-scoring `interactive`. |
 | `modelProvider` | `"none"` | `command`, `openai-compatible`, `ollama`, or `replay`. |
 | `modelTimeoutMs` | `1500` | Per-round provider budget, capped by the global deadline. |
 | `modelMaxRounds` | `4` | Interactive rounds at one node. |
 | `modelMaxFeedbackEvents` | `48` | Feedback tail sent to the model. |
-| `modelLeanCode` | `true` | Accept validated core Lean tactic candidates in interactive mode. |
+| `modelLeanCode` | `true` | Compatibility gate for Lean tactic candidates. |
+| `experimentalRawLeanCode` | `false` | Required second gate; raw model code is off by default. |
+| `plannerMaxPayloadChars` | `16000` | Hard cap on final planner/interactive JSON sent to a provider. |
+| `plannerMaxCalls` | `4` | Maximum event-triggered planner calls in one proof search. |
 | `modelMaxCodeCandidates` | `4` | Maximum code candidates executed per response. |
 | `modelMaxCodeChars` | `12000` | Per-candidate source bound. |
 | `modelCodeMaxHeartbeats` | `50000` | Fresh Lean heartbeat allowance per candidate. |

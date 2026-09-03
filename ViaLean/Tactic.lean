@@ -45,7 +45,7 @@ elab_rules : tactic
         let some mid ← validateEqualityMid cfg snap mid
           | throwError "invalid or trivial equality midpoint"
         closeWithManual goal cfg {
-          kind := .equalityMid, payload := .equalityMid mid, source := "manual",
+          kind := .equalityMid, payload := .equalityMid mid, origin := .manual, source := "manual",
           fingerprint := proposalFingerprint .equalityMid mid }
   | `(tactic| propose $config:optConfig via_iff $mid:term) => do
       let cfg ← proposeConfig config
@@ -58,7 +58,7 @@ elab_rules : tactic
         let some mid ← validateIffMid cfg snap mid
           | throwError "invalid or trivial equivalence midpoint"
         closeWithManual goal cfg {
-          kind := .iffMid, payload := .iffMid mid, source := "manual",
+          kind := .iffMid, payload := .iffMid mid, origin := .manual, source := "manual",
           fingerprint := proposalFingerprint .iffMid mid }
   | `(tactic| propose $config:optConfig via_cut $cut:term) => do
       let cfg ← proposeConfig config
@@ -69,7 +69,7 @@ elab_rules : tactic
         let some cut ← validateCutType cfg snap cut
           | throwError "invalid or no-progress cut type"
         closeWithManual goal cfg {
-          kind := .cut, payload := .cutType cut, source := "manual",
+          kind := .cut, payload := .cutType cut, origin := .manual, source := "manual",
           fingerprint := proposalFingerprint .cut cut }
   | `(tactic| propose $config:optConfig via_witness $witness:term) => do
       let cfg ← proposeConfig config
@@ -82,7 +82,7 @@ elab_rules : tactic
         let some witness ← validateWitness cfg snap witness
           | throwError "invalid witness"
         closeWithManual goal cfg {
-          kind := .witness, payload := .witness witness, source := "manual",
+          kind := .witness, payload := .witness witness, origin := .manual, source := "manual",
           fingerprint := proposalFingerprint .witness witness }
 
 end ViaLean

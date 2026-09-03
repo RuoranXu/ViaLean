@@ -35,14 +35,6 @@ private structure NativeContext where
 private def NativeContext.beforeDeadline (ctx : NativeContext) : MetaM Bool := do
   return (← IO.monoMsNow) < ctx.deadlineMs
 
-private def goalKey (goal : MVarId) : MetaM UInt64 := goal.withContext do
-  let target ← instantiateMVars (← goal.getType)
-  let mut key := hash target
-  for decl in ← getLCtx do
-    unless decl.isImplementationDetail do
-      key := hash (key, hash (← instantiateMVars decl.type))
-  return key
-
 private def exactLocal? (goal : MVarId) (target : Expr) : MetaM Bool := do
   for decl in ← getLCtx do
     unless decl.isImplementationDetail do
@@ -61,7 +53,7 @@ private def constructorsFor (target : Expr) : MetaM (Array Name) := do
 mutual
   private partial def solveNativeGoals
       (goals : List MVarId) (ctx : NativeContext) (depth : Nat)
-      (path : Std.HashSet UInt64) : MetaM Bool := do
+      (path : StrictGoalSet) : MetaM Bool := do
     for child in goals do
       unless ← solveNativeGoal child ctx depth path do
         return false
@@ -69,7 +61,7 @@ mutual
 
   private partial def tryApply
       (goal : MVarId) (candidate : Expr) (ctx : NativeContext) (depth : Nat)
-      (path : Std.HashSet UInt64) : MetaM Bool := do
+      (path : StrictGoalSet) : MetaM Bool := do
     let current ← ctx.stats.get
     if current.attemptedApplications ≥ ctx.config.nativeMaxApplications then return false
     let saved ← saveState
@@ -104,7 +96,7 @@ mutual
 
   private partial def trySimp
       (goal : MVarId) (ctx : NativeContext) (depth : Nat)
-      (path : Std.HashSet UInt64) : MetaM Bool := do
+      (path : StrictGoalSet) : MetaM Bool := do
     let saved ← saveState
     ctx.stats.modify fun s => { s with attemptedTransforms := s.attemptedTransforms + 1 }
     try
@@ -129,7 +121,7 @@ mutual
 
   private partial def tryCases
       (goal : MVarId) (ctx : NativeContext) (depth : Nat)
-      (path : Std.HashSet UInt64) : MetaM Bool := do
+      (path : StrictGoalSet) : MetaM Bool := do
     for decl in ← getLCtx do
       unless decl.isImplementationDetail do
         let type ← instantiateMVars decl.type
@@ -148,12 +140,12 @@ mutual
 
   private partial def solveNativeGoal
       (goal : MVarId) (ctx : NativeContext) (depth : Nat)
-      (path : Std.HashSet UInt64) : MetaM Bool := do
+      (path : StrictGoalSet) : MetaM Bool := do
     if ← goal.isAssigned then return true
     if depth > ctx.config.nativeMaxDepth || !(← ctx.beforeDeadline) then return false
     ctx.stats.modify fun s => { s with nodes := s.nodes + 1 }
     goal.withContext do
-      let key ← goalKey goal
+      let key ← mkGoalKey goal
       if path.contains key then return false
       let path := path.insert key
       let target ← instantiateMVars (← goal.getType)

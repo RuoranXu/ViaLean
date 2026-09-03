@@ -29,6 +29,10 @@ private def checkAtlas
         throwError "future graph exceeded its node bound"
       unless futureProbe.future.any fun view => view.depth ≥ 2 do
         throwError "future graph did not expose a genuinely multi-step path"
+      unless futureProbe.future.any fun view => view.path.contains "cases:" do
+        throwError "future family fairness lost the elimination branch"
+      unless futureProbe.future.any fun view => view.path.contains "apply:" do
+        throwError "future family fairness lost the backward-application branch"
       for view in futureProbe.future do
         unless view.depth ≤ cfg.frontierFutureDepth do
           throwError "future graph exceeded its depth bound"
@@ -39,6 +43,14 @@ private def checkAtlas
       for branch in probe.goals do
         unless branch.contains "⊢" && branch.contains ":" do
           throwError "frontier branch omitted its local context/turnstile: {branch}"
+
+    let noWork ← FrontierEngine.build snap { cfg with atlasMaxMetaOps := 0 }
+    unless noWork.isEmpty do
+      throwError "frontier performed work after atlasMaxMetaOps was exhausted"
+    let oneView ← FrontierEngine.build snap { cfg with
+      frontierMaxProbes := 1, atlasMaxMetaOps := 90 }
+    unless oneView.size ≤ 1 do
+      throwError "frontier output bound was confused with exploration work"
 
 elab "frontier_logic_guard" : tactic => do
   checkAtlas (← getMainGoal) #["future-graph", "elimination", "backward", "forward"]

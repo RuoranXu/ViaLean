@@ -2,6 +2,13 @@ import ViaLean.Basic
 
 namespace ViaLean
 
+inductive RankingMode
+  | prior
+  | ucb
+  | planner
+  | hybrid
+deriving BEq, Repr, Inhabited
+
 structure ProposeConfig where
   timeoutSec             : Nat := 10
   directProbeSec         : Nat := 1
@@ -9,6 +16,8 @@ structure ProposeConfig where
   finalDirectMinSec      : Nat := 2
   maxDepth               : Nat := 2
   maxCandidates          : Nat := 12
+  maxRetrievedPremises   : Nat := 12
+  maxActionsPerNode      : Nat := 32
   maxCandidatesPerFamily : Nat := 4
   maxProposalSize        : Nat := 120
   maxStructuralChildren  : Nat := 6
@@ -41,6 +50,11 @@ structure ProposeConfig where
   modelMaxCodeCandidates  : Nat := 4
   modelMaxCodeChars       : Nat := 12000
   modelCodeMaxHeartbeats  : Nat := 50000
+  experimentalRawLeanCode : Bool := false
+  plannerMaxPayloadChars  : Nat := 16000
+  plannerMaxCalls         : Nat := 4
+  plannerMinReplanGain    : Float := 0.1
+  plannerAllowExpansion   : Bool := true
   allowTypeCuts          : Bool := false
   ucb                     : Bool := true
   ucbExploration         : Float := 0.8
@@ -48,6 +62,8 @@ structure ProposeConfig where
   persistentStatsPath    : String := ""
   trace                   : Bool := false
   deterministic          : Bool := true
+  rankingMode             : RankingMode := .prior
+  stableTieBreak          : Bool := true
   nativeMaxDepth         : Nat := 8
   nativeMaxApplications  : Nat := 256
   nativeTransforms        : Bool := true
@@ -63,5 +79,12 @@ structure ProposeConfig where
   frontierFutureDepth     : Nat := 3
   frontierFutureWidth     : Nat := 6
   frontierFutureNodes     : Nat := 24
+  atlasMaxNodes           : Nat := 96
+  atlasMaxTransitions     : Nat := 160
+  atlasMaxWorkUnits       : Nat := 256
+  atlasMaxMetaOps         : Nat := 256
+  atlasMaxRenderedChars   : Nat := 16000
+  atlasMaxRegions         : Nat := 12
+  atlasRareStrategyReserve : Nat := 1
 
 end ViaLean

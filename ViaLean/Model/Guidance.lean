@@ -53,6 +53,7 @@ private def actionKindAndSummary (action : ProofAction) : MetaM (String × Strin
   | .sketch holes => return ("sketch", s!"{holes.size} holes")
   | .proposal proposal =>
       let summary ← match proposal.payload with
+        | .directTerm term => pp term
         | .cutType type => pp type
         | .libraryApply theoremName => pure (toString theoremName)
         | .equalityMid mid => pp mid

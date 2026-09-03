@@ -22,6 +22,11 @@ private def interactiveSystemPrompt : String :=
   "{\"probe_index\":number}]. Complete `by` terms and partial tactic sequences are both useful. " ++
   "Use ordinary core Lean proof tactics only. Do not use run_tac, eval/native tactics, set_option, macros, " ++
   "declarations, imports, commands, non-core tactic extensions, or invented IDs. Revise code from execution feedback."
+
+private def plannerSystemPrompt : String :=
+  "You plan over ViaLean's bounded executable proof atlas. Return JSON only using vialean.planner.v2. " ++
+  "Estimate root_value and confidence, rank only supplied transition/region ids, give one strategy, " ++
+  "and optionally request bounded expansion. You may propose direction, but Lean validates every transition."
 private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : Json := Json.mkObj [
   ("model", cfg.modelName),
   ("temperature", toJson cfg.modelTemperature),
@@ -39,7 +44,20 @@ private def openAIInteractionRequestJson
   ("max_tokens", cfg.modelMaxTokens),
   ("messages", Json.arr #[
     Json.mkObj [("role", "system"), ("content", interactiveSystemPrompt)],
-    Json.mkObj [("role", "user"), ("content", ModelProtocol.interactionRequestText request)]
+    Json.mkObj [("role", "user"),
+      ("content", ModelProtocol.interactionRequestTextCapped request cfg.plannerMaxPayloadChars)]
+  ])
+]
+
+private def openAIPlannerRequestJson
+    (cfg : ProposeConfig) (request : ModelProtocol.PlannerRequestV2) : Json := Json.mkObj [
+  ("model", cfg.modelName),
+  ("temperature", toJson cfg.modelTemperature),
+  ("max_tokens", cfg.modelMaxTokens),
+  ("messages", Json.arr #[
+    Json.mkObj [("role", "system"), ("content", plannerSystemPrompt)],
+    Json.mkObj [("role", "user"),
+      ("content", ModelProtocol.plannerRequestTextCapped request cfg.plannerMaxPayloadChars)]
   ])
 ]
 private def extractOpenAIContent (text : String) : Except String String := do
@@ -103,7 +121,7 @@ private def queryInteractionCommand
     | .ok args => pure args
     | .error error => return .error s!"invalid modelCommandArgsJson: {error}"
   match ← runBoundedProcess cfg.modelCommand args
-      (ModelProtocol.interactionRequestText request) timeoutMs cfg.modelMaxResponseChars with
+      (ModelProtocol.interactionRequestTextCapped request cfg.plannerMaxPayloadChars) timeoutMs cfg.modelMaxResponseChars with
   | .ok output => return ModelProtocol.parseContinuation output.stdout cfg.modelMaxSignals
   | .error error => return .error error
 
@@ -155,6 +173,44 @@ def queryInteraction
   | "command" => queryInteractionCommand cfg request timeoutMs
   | "replay" => return ModelProtocol.parseContinuation cfg.modelReplayResponse cfg.modelMaxSignals
   | "openai" | "openai-compatible" | "ollama" => queryInteractionOpenAI cfg request timeoutMs
+  | "none" | "" => return .error "model provider is disabled"
+  | other => return .error s!"unknown model provider: {other}"
+
+def queryPlanner
+    (cfg : ProposeConfig) (request : ModelProtocol.PlannerRequestV2) (timeoutMs : Nat) :
+    IO (Except String ModelProtocol.PlannerResponseV2) := do
+  let payload := ModelProtocol.plannerRequestTextCapped request cfg.plannerMaxPayloadChars
+  match cfg.modelProvider.trimAscii.toString.toLower with
+  | "replay" => return ModelProtocol.parsePlannerResponse cfg.modelReplayResponse cfg.modelMaxSignals
+  | "command" =>
+      let args ← match ModelProtocol.parseArgs cfg.modelCommandArgsJson with
+        | .ok args => pure args
+        | .error error => return .error s!"invalid modelCommandArgsJson: {error}"
+      match ← runBoundedProcess cfg.modelCommand args payload timeoutMs cfg.modelMaxResponseChars with
+      | .ok output => return ModelProtocol.parsePlannerResponse output.stdout cfg.modelMaxSignals
+      | .error error => return .error error
+  | "openai" | "openai-compatible" | "ollama" =>
+      unless cfg.modelEndpoint.startsWith "http://" || cfg.modelEndpoint.startsWith "https://" do
+        return .error "modelEndpoint must use http:// or https://"
+      if cfg.modelName.isEmpty then return .error "modelName is empty"
+      let secret? ← if cfg.modelApiKeyEnv.isEmpty then pure none else IO.getEnv cfg.modelApiKeyEnv
+      if let some secret := secret? then
+        unless validSecret secret do return .error "API key contains a newline"
+      IO.FS.withTempFile fun configHandle configPath => do
+        if let some secret := secret? then
+          configHandle.putStrLn s!"header = \"Authorization: Bearer {escapeCurlConfig secret}\""
+        configHandle.flush
+        let timeoutSec := max 1 ((timeoutMs + 999) / 1000)
+        let args := #["--silent", "--show-error", "--fail-with-body", "--max-time",
+          toString timeoutSec, "--header", "Content-Type: application/json", "--config",
+          configPath.toString, "--data-binary", "@-", cfg.modelEndpoint]
+        match ← runBoundedProcess cfg.modelCurlCommand args
+            (openAIPlannerRequestJson cfg request).compress timeoutMs cfg.modelMaxResponseChars with
+        | .error error => return .error error
+        | .ok output =>
+            match extractOpenAIContent output.stdout with
+            | .error error => return .error s!"invalid OpenAI-compatible response: {error}"
+            | .ok content => return ModelProtocol.parsePlannerResponse content cfg.modelMaxSignals
   | "none" | "" => return .error "model provider is disabled"
   | other => return .error s!"unknown model provider: {other}"
 end ModelProvider

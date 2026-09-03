@@ -38,17 +38,22 @@ inductive ActionExpansion
   | open (bundle : GoalBundle)
 
 def Proposal.family : Proposal → ProposalFamily
-  | { kind := .equalityMid, source, .. } =>
-      if source.startsWith "external" then .equalityExternal
-      else if source.startsWith "local" then .equalityLocal
-      else .equalityNormalize
-  | { kind := .witness, source, .. } =>
-      if source.startsWith "external" then .witnessExternal else .witnessLocal
-  | { kind := .cut, source, .. } =>
-      if source.startsWith "external" then .externalCut
-      else if source.startsWith "library" then .libraryCut
-      else .localCut
+  | { kind := .equalityMid, origin, .. } =>
+      match origin with
+      | .external | .planner => .equalityExternal
+      | .local => .equalityLocal
+      | _ => .equalityNormalize
+  | { kind := .witness, origin, .. } =>
+      match origin with
+      | .external | .planner => .witnessExternal
+      | _ => .witnessLocal
+  | { kind := .cut, origin, .. } =>
+      match origin with
+      | .external | .planner => .externalCut
+      | .library _ => .libraryCut
+      | _ => .localCut
   | { kind := .structural, .. } => .structural
+  | { kind := .direct, .. } => .direct
   | _ => .direct
 
 def Proposal.compile (proposal : Proposal) : ProofAction := {

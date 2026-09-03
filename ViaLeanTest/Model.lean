@@ -155,6 +155,7 @@ example (P : Prop) : P → P := by
     (witnesses := false)
     (nativeTransforms := false)
     (nativeCases := false)
+    (experimentalRawLeanCode := true)
     (modelMaxRounds := 1)
 
 /-- A partial model tactic exposes obligations that symbolic search completes. -/
@@ -173,4 +174,5 @@ example (P Q : Prop) (p : P) (q : Q) : P ∧ Q := by
     (witnesses := false)
     (nativeTransforms := false)
     (nativeCases := false)
+    (experimentalRawLeanCode := true)
     (modelMaxRounds := 1)
