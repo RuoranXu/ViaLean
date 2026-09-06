@@ -100,8 +100,7 @@ that declare the target theorems with `sorry`, and disables library retrieval on
 the miniF2F cases to prevent answer leakage. Run `lake env lean ViaLeanMathlibTest/MiniF2F.lean` inside that subproject to force the six cases and stream their JSONL records.
 
 On the full 244-problem miniF2F test split, the current mathlib integration solves
-122 problems (50.0%) under the repository's local search profiles, up from 112
-(45.9%) in the previous internal baseline. This is a kernel-checked, model-free
+122 problems (50.0%) under the repository's local search profiles. This is a kernel-checked, model-free
 snapshot rather than a claim about model-assisted performance; machine, timeout,
 and model settings should be reported when comparing runs.
 
