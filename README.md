@@ -1,6 +1,7 @@
 # ViaLean
 
 **Persistent neural-symbolic proof search for Lean 4.** The current model-free mathlib configuration solves **(50.0% pass@1)** on the full miniF2F test split.
+
 (DeepSeek‑Prover‑V1.5‑RL：50.0%(pass@32) Goedel‑Prover‑V1‑SFT：57.6%(pass@32))
 
 ViaLean is an independent theorem-proving engine that combines structured symbolic search with optional language-model guidance. It maintains a bounded, persistent graph of proof states and verified transitions, explores diverse local futures, and lets a model reason over that evolving proof space instead of limiting it to one-step tactic selection.
