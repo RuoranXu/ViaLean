@@ -50,6 +50,30 @@ private def constructorsFor (target : Expr) : MetaM (Array Name) := do
   | some (.inductInfo info) => return info.ctors.toArray
   | _ => return #[]
 
+/-- Eager `simpTargetStar`/`cases` can enter long kernel traversals when the
+local context contains higher-order propositions. Those goals remain available
+to ordinary application and structural search, but not to eager transforms. -/
+private partial def containsConstName (needle : Name) : Expr → Bool
+  | .const name _ => name == needle
+  | .app fn arg => containsConstName needle fn || containsConstName needle arg
+  | .lam _ domain body _ | .forallE _ domain body _ =>
+      containsConstName needle domain || containsConstName needle body
+  | .letE _ type value body _ =>
+      containsConstName needle type || containsConstName needle value ||
+        containsConstName needle body
+  | .mdata _ body | .proj _ _ body => containsConstName needle body
+  | _ => false
+
+private def safeForEagerTransforms (target : Expr) : MetaM Bool := do
+  let target ← instantiateMVars target
+  if target.isForall || containsConstName ``Exists target then return false
+  for decl in ← getLCtx do
+    unless decl.isImplementationDetail do
+      let type ← instantiateMVars decl.type
+      if (← isProp type) && (type.isForall || containsConstName ``Exists type) then
+        return false
+  return true
+
 mutual
   private partial def solveNativeGoals
       (goals : List MVarId) (ctx : NativeContext) (depth : Nat)
@@ -125,7 +149,8 @@ mutual
     for decl in ← getLCtx do
       unless decl.isImplementationDetail do
         let type ← instantiateMVars decl.type
-        if (← isProp type) && !type.isEq && !type.isHEq then
+        let constructors ← constructorsFor type
+        if (← isProp type) && !type.isEq && !type.isHEq && !constructors.isEmpty then
           let saved ← saveState
           ctx.stats.modify fun s => { s with attemptedTransforms := s.attemptedTransforms + 1 }
           try
@@ -159,7 +184,8 @@ mutual
         goal.assign (mkConst ``True.intro)
         return true
 
-      if ctx.config.nativeTransforms then
+      let eagerTransformsSafe ← safeForEagerTransforms target
+      if ctx.config.nativeTransforms && eagerTransformsSafe then
         if ← tryContradiction goal ctx then return true
         if ← trySimp goal ctx depth path then return true
 

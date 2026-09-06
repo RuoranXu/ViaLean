@@ -11,3 +11,6 @@ import ViaLeanTest.NativeTransforms
 import ViaLeanTest.Frontier
 import ViaLeanTest.Integration
 import ViaLeanTest.V3Core
+import ViaLeanTest.V3Integration
+import ViaLeanTest.StdDataset
+import ViaLeanTest.V3Interaction

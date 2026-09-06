@@ -13,3 +13,14 @@ jobs:
         with:
           build: true
           test: true
+
+  mathlib:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: integration/mathlib
+          build: true
+          test: true
+          use-mathlib-cache: true

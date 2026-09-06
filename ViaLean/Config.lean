@@ -20,6 +20,9 @@ structure ProposeConfig where
   maxActionsPerNode      : Nat := 32
   maxCandidatesPerFamily : Nat := 4
   maxProposalSize        : Nat := 120
+  localSynthDepth          : Nat := 3
+  localSynthMaxTerms       : Nat := 64
+  localSynthMaxGaps        : Nat := 24
   maxStructuralChildren  : Nat := 6
   structural             : Bool := true
   cuts                   : Bool := true
@@ -28,7 +31,7 @@ structure ProposeConfig where
   witnesses              : Bool := true
   library                : Bool := true
   ai                     : Bool := false
-  modelMode               : String := "policy"
+  modelMode               : String := "planner"
   modelProvider          : String := "none"
   modelCommand           : String := ""
   modelCommandArgsJson   : String := "[]"
@@ -55,12 +58,18 @@ structure ProposeConfig where
   plannerMaxCalls         : Nat := 4
   plannerMinReplanGain    : Float := 0.1
   plannerAllowExpansion   : Bool := true
+  plannerUncertaintyThreshold : Float := 0.45
+  plannerFailureReplanCount : Nat := 2
+  plannerMinNewNodes       : Nat := 1
+  plannerMinNewTransitions : Nat := 2
   allowTypeCuts          : Bool := false
   ucb                     : Bool := true
   ucbExploration         : Float := 0.8
   ucbPriorWeight         : Float := 0.25
   persistentStatsPath    : String := ""
   trace                   : Bool := false
+  traceJsonlPath          : String := ""
+  traceMaxEvents          : Nat := 4096
   deterministic          : Bool := true
   rankingMode             : RankingMode := .prior
   stableTieBreak          : Bool := true
@@ -70,6 +79,7 @@ structure ProposeConfig where
   nativeCases             : Bool := true
   nativeMaxCaseBranches   : Nat := 6
   frontier                : Bool := true
+  atlasGraph              : Bool := true
   frontierMaxProbes       : Nat := 32
   frontierMaxPerPerspective : Nat := 4
   frontierMaxChildren     : Nat := 6
@@ -86,5 +96,10 @@ structure ProposeConfig where
   atlasMaxRenderedChars   : Nat := 16000
   atlasMaxRegions         : Nat := 12
   atlasRareStrategyReserve : Nat := 1
+  atlasGuaranteedWork      : Nat := 96
+  atlasAdaptiveWork        : Nat := 96
+  atlasNeuralWork          : Nat := 64
+  atlasExpansionMaxDepth   : Nat := 6
+  atlasExpansionMaxWidth   : Nat := 8
 
 end ViaLean

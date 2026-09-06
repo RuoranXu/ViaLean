@@ -65,6 +65,22 @@ def StrategyFamily.name : StrategyFamily → String
   | .leaf => "leaf"
   | .mixed => "mixed"
 
+def StrategyFamily.ofName? (name : String) : Option StrategyFamily :=
+  match name.trimAscii.toString.toLower with
+  | "normalization" => some .normalization
+  | "contradiction" | "consistency" => some .contradiction
+  | "equality" | "rewrite" => some .equality
+  | "elimination" | "cases" => some .elimination
+  | "construction" | "constructor" => some .construction
+  | "backward" | "apply" => some .backward
+  | "forward" => some .forward
+  | "witness" => some .witness
+  | "cut" | "helper" => some .cut
+  | "structural" | "intro" => some .structural
+  | "leaf" | "direct" => some .leaf
+  | "mixed" => some .mixed
+  | _ => none
+
 def SymbolicOperation.name : SymbolicOperation → String
   | .exactTerm _ => "exact_term"
   | .exactLocal _ => "exact_local"

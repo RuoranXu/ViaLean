@@ -24,9 +24,15 @@ private def interactiveSystemPrompt : String :=
   "declarations, imports, commands, non-core tactic extensions, or invented IDs. Revise code from execution feedback."
 
 private def plannerSystemPrompt : String :=
-  "You plan over ViaLean's bounded executable proof atlas. Return JSON only using vialean.planner.v2. " ++
-  "Estimate root_value and confidence, rank only supplied transition/region ids, give one strategy, " ++
-  "and optionally request bounded expansion. You may propose direction, but Lean validates every transition."
+  "You are the untrusted planner for ViaLean's persistent proof hypergraph. Return one JSON object using vialean.planner.v2. " ++
+  "Reason over regions, nodes, AND-transitions, verified/pending/speculative objects, structured observations, and budget. " ++
+  "Return root_value and confidence; preferred_regions and transition_scores may reference only supplied IDs. " ++
+  "A strategy may include primary_family, secondary_families, objective, horizon, and stop_condition. " ++
+  "When visibility is insufficient, use expansion_requests with region_id, family, extra_depth, extra_width, and reason; " ++
+  "Lean may deny requests at the global budget. Emit a thought batch rather than one brittle action: each thought has " ++
+  "id, kind, expression_ref, and dependencies. expression_ref may name a visible local/constant or object:<id>. " ++
+  "Thoughts are independently checked, so preserve useful siblings when another thought is rejected. " ++
+  "Never claim proof acceptance and do not emit raw Lean code unless the request explicitly enables experimental code."
 private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : Json := Json.mkObj [
   ("model", cfg.modelName),
   ("temperature", toJson cfg.modelTemperature),
@@ -181,7 +187,14 @@ def queryPlanner
     IO (Except String ModelProtocol.PlannerResponseV2) := do
   let payload := ModelProtocol.plannerRequestTextCapped request cfg.plannerMaxPayloadChars
   match cfg.modelProvider.trimAscii.toString.toLower with
-  | "replay" => return ModelProtocol.parsePlannerResponse cfg.modelReplayResponse cfg.modelMaxSignals
+  | "replay" =>
+      let response := match request.regions[0]? with
+        | some region =>
+            cfg.modelReplayResponse
+              |>.replace "__FIRST_REGION_ID__" region.id
+              |>.replace "__FIRST_REGION_FAMILY__" region.family
+        | none => cfg.modelReplayResponse
+      return ModelProtocol.parsePlannerResponse response cfg.modelMaxSignals
   | "command" =>
       let args ← match ModelProtocol.parseArgs cfg.modelCommandArgsJson with
         | .ok args => pure args

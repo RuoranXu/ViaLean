@@ -1,5 +1,6 @@
 import ViaLean.Tactic
 import ViaLean.Search
+import ViaLean.Benchmark
 import ViaLean.Validate
 import ViaLean.Compose
 import ViaLean.Action
@@ -9,9 +10,11 @@ import ViaLean.Symbolic
 import ViaLean.Atlas.Types
 import ViaLean.Workspace
 import ViaLean.Synthesis.Local
+import ViaLean.Synthesis.Engine
 import ViaLean.Planner.Guidance
 import ViaLean.Planner.Conjecture
 import ViaLean.Search.State
+import ViaLean.Search.Replan
 import ViaLean.Search.ModelCode
 import ViaLean.Premise.Basic
 import ViaLean.Premise.Local

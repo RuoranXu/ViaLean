@@ -46,24 +46,29 @@ private def allowedModelSyntaxKinds : Array String := #[
   "Lean.Parser.Tactic.rfl", "Lean.Parser.Tactic.simpAll"
 ]
 
-private def allowedModelSyntaxKind (kind : Name) : Bool :=
-  kind.isAnonymous || allowedModelSyntaxKinds.contains kind.toString
+private def allowedModelSyntaxKind (extraAllowed : Array Name) (kind : Name) : Bool :=
+  kind.isAnonymous || allowedModelSyntaxKinds.contains kind.toString ||
+    extraAllowed.contains kind
 
-private partial def validateModelSyntax (stx : Syntax) : Except String Unit := do
+private partial def validateModelSyntax
+    (extraAllowed : Array Name) (stx : Syntax) : Except String Unit := do
   match stx with
   | .missing | .atom .. | .ident .. => pure ()
   | .node _ kind args =>
       if forbiddenModelSyntaxKind kind then
         throw s!"unsafe Lean syntax is not permitted for model code: {kind}"
-      unless allowedModelSyntaxKind kind do
+      unless allowedModelSyntaxKind extraAllowed kind do
         throw s!"unsupported non-core syntax in model code: {kind}"
-      for arg in args do validateModelSyntax arg
+      for arg in args do validateModelSyntax extraAllowed arg
 
-/-- Parse model text as a small reviewed core tactic subset. Execution remains opt-in. -/
-def parseSafeModelTactic (env : Environment) (code : String) : Except String Syntax := do
+/-- Parse model text using the core allowlist plus exact syntax kinds granted by
+a trusted integration router. Namespace prefixes and user-provided strings are
+never treated as capabilities. Execution remains separately opt-in. -/
+def parseSafeModelTacticWithKinds (env : Environment) (code : String)
+    (extraAllowed : Array Name) : Except String Syntax := do
   let wrapped := if code.startsWith "by" then code else "by\n  " ++ code
   let term ← Parser.runParserCategory env `term wrapped
-  validateModelSyntax term
+  validateModelSyntax extraAllowed term
   match term with
   | .node _ kind args =>
       unless kind.toString == "Lean.Parser.Term.byTactic" do
@@ -71,5 +76,9 @@ def parseSafeModelTactic (env : Environment) (code : String) : Except String Syn
       let some tactics := args[1]? | throw "malformed by-proof"
       return tactics
   | _ => throw "model Lean code must be a by-proof or a tactic sequence"
+
+/-- Dependency-free default: only the reviewed core tactic subset. -/
+def parseSafeModelTactic (env : Environment) (code : String) : Except String Syntax :=
+  parseSafeModelTacticWithKinds env code #[]
 
 end ViaLean

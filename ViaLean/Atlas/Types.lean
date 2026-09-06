@@ -23,6 +23,10 @@ structure AtlasNode where
   id : AtlasNodeId
   key : GoalKey
   snapshot : GoalSnapshot
+  /-- A context-complete rendering captured while preview metavariables are live.
+  Preview nodes survive Meta-state rollback, so consumers use this durable view. -/
+  renderedGoal : String := ""
+  preview : Bool := false
   depth : Nat
   parent? : Option AtlasNodeId := none
   status : KnowledgeStatus := .verified
@@ -136,9 +140,34 @@ def ProofAtlas.observeGoal
             stats := { atlas.stats with nodesCreated := atlas.stats.nodesCreated + 1 } },
           some id, true)
 
+/-- Insert a counterfactual goal observed during bounded symbolic expansion. -/
+def ProofAtlas.observePreview
+    (atlas : ProofAtlas) (limits : AtlasLimits) (snap : GoalSnapshot) (depth : Nat)
+    (renderedGoal : String) (parent? : Option AtlasNodeId := none) :
+    ProofAtlas × Option AtlasNodeId × Bool :=
+  match atlas.nodeForKey? snap.key with
+  | some node =>
+      ({ atlas with stats := { atlas.stats with
+          transpositions := atlas.stats.transpositions + 1 } }, some node.id, false)
+  | none =>
+      if atlas.nodes.size >= limits.maxNodes then
+        ({ atlas with stats := { atlas.stats with
+            rejectedByBudget := atlas.stats.rejectedByBudget + 1 } }, none, false)
+      else
+        let id := UInt64.ofNat atlas.nextNode
+        let node : AtlasNode := {
+          id, key := snap.key, snapshot := snap, depth, parent?, renderedGoal, preview := true }
+        ({ atlas with
+            root? := atlas.root?.orElse (fun _ => some id)
+            nodes := atlas.nodes.push node
+            nextNode := atlas.nextNode + 1
+            stats := { atlas.stats with nodesCreated := atlas.stats.nodesCreated + 1 } },
+          some id, true)
+
 def ProofAtlas.offerTransition
     (atlas : ProofAtlas) (limits : AtlasLimits) (parent : AtlasNodeId)
-    (candidate : SymbolicTransitionCandidate) : ProofAtlas × Option TransitionId :=
+    (candidate : SymbolicTransitionCandidate) (executable : Bool := true) :
+    ProofAtlas × Option TransitionId :=
   match atlas.transitions.find? fun t =>
       t.parent == parent && t.candidate.fingerprint == candidate.fingerprint with
   | some transition => (atlas, some transition.id)
@@ -149,7 +178,7 @@ def ProofAtlas.offerTransition
             rejectedByBudget := atlas.stats.rejectedByBudget + 1 } }, none)
       else
         let id := UInt64.ofNat atlas.nextTransition
-        let transition : AtlasTransition := { id, parent, candidate }
+        let transition : AtlasTransition := { id, parent, candidate, executable }
         ({ atlas with
             transitions := atlas.transitions.push transition
             nextTransition := atlas.nextTransition + 1
@@ -160,9 +189,13 @@ def ProofAtlas.linkChild
     (atlas : ProofAtlas) (transitionId : TransitionId) (child : AtlasNodeId) : ProofAtlas :=
   { atlas with transitions := atlas.transitions.map fun transition =>
       if transition.id == transitionId && !transition.children.contains child then
-        { transition with children := transition.children.push child, evidence := {
+        let children := transition.children.push child
+        { transition with children, coupled := children.size > 1, evidence := {
             transition.evidence with outcome := .expanded } }
       else transition }
+
+def ProofAtlas.recordMetaOp (atlas : ProofAtlas) (count : Nat := 1) : ProofAtlas :=
+  { atlas with stats := { atlas.stats with metaOps := atlas.stats.metaOps + count } }
 
 def ProofAtlas.recordOutcome
     (atlas : ProofAtlas) (transitionId : TransitionId) (outcome : TransitionOutcome)

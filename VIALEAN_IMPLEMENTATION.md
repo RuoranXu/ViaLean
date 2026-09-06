@@ -64,10 +64,17 @@ The shared deadline is checked in controller and frontier loops, recomputed afte
 - `ViaLean/Model/Provider.lean`: command, replay, and OpenAI-compatible transports.
 - `ViaLean/Model/Guidance.lean`: bounded request rendering.
 - `ViaLean/Planner/Guidance.lean`, `Planner/Conjecture.lean`: Atlas compression, planner decisions and independently validated open-world candidates.
-- `ViaLean/Search/State.lean`, `Search/ModelCode.lean`, `Search.lean`: state, experimental code boundary, AND/OR control, replay, replan and rollback.
+- `ViaLean/Search/State.lean`, `Search/Replan.lean`: persistent controller state and semantic event-driven replanning.
+- `ViaLean/Search/Decision.lean`, `Search/Replay.lean`: ranking/failure decisions and inert ID/index replay resolution.
+- `ViaLean/Search/Execute.lean`, `Search/Controller.lean`: transactional Meta execution and one cancellation deadline over the full search.
+- `ViaLean/Search/ModelCode.lean`: the experimental raw-code parser and exact syntax allowlist.
+- `ViaLean/Search.lean`: AND/OR orchestration over the split services.
+- `ViaLean/Benchmark.lean`, `Trace.lean`: matched-compute ablations and redacted stable JSONL events.
 - `ViaLean/Compose.lean`, `Validate.lean`: proof construction and trust boundary.
 - `ViaLean/Tactic.lean`: `propose` and `propose?`.
 - `ViaLeanTest/`: regression, frontier diversity, protocol, replay, and safety tests.
+- `integration/mathlib/`: isolated mathlib/Lean 4 miniF2F package, trusted math
+  tactic leaf router, `propose_mathlib`, and non-leaking benchmark smoke tests.
 
 ## Safety invariants
 

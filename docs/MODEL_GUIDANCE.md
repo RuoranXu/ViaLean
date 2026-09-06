@@ -25,6 +25,13 @@ Typed thoughts can be `direct_term`/`exact`, `equality_bridge`, `iff_bridge`, `w
 
 The fully serialized request—not merely its components—is hard-capped by `plannerMaxPayloadChars`. Compression drops old observations, non-representative nodes/transitions and long goal text in that order while retaining valid JSON.
 
+Expansion requests use region_id, optional family, extra_depth, extra_width, and reason_code (legacy reason is also accepted). They allocate bounded symbolic work; they do not select or accept a proof. Strategy plans may include secondary_families, horizon, and stop_condition so one epoch can express a multi-step intent.
+
+Each later epoch receives only observations and objects newer than its lastSeenVersion, plus compact memory for the active family and confidence. Workspace object expressions are serialized as opaque IDs with status, blockers, and utility; raw Lean Expr values and local replay handles never cross the provider boundary.
+
+For deterministic replay tests, __FIRST_REGION_ID__ and __FIRST_REGION_FAMILY__ in modelReplayResponse are replaced from the actual serialized request. This exercises the same region-selection path without hard-coding run-specific IDs.
+
+
 ## Interactive mode: diverse finite lookahead
 
 Interactive mode is designed for dense forward signal without scalar scoring or many rollouts:
@@ -176,6 +183,8 @@ Or by request-local array index, useful for replay tests:
 
 The parser accepts `lean`, `lean_code`, and ordered `lean_candidates` forms. Repeated code, unknown IDs, non-executable probes, and out-of-range selections are ignored. Code candidates run before optional selections in each round.
 
+The dependency-free router accepts only exact reviewed core syntax kinds. An optional trusted `LeafRouter` may grant additional exact parser-node capabilities; the mathlib adapter uses this to admit its reviewed `norm_num`, `omega`, `linarith`, `ring_nf`, and bare `aesop` syntax. This is not a namespace-prefix or user-configurable bypass: the forbidden-syntax test runs first, so commands, `run_tac`, evaluation/native execution, option overrides, and macros remain rejected.
+
 ## Policy mode
 
 `modelMode := "policy"` remains the compatibility mode. It asks for a goal value and scores only over existing action IDs, clamps scores to `[0, 1]`, uses the goal value as the fallback signal for unscored actions, mixes signals with local priors using `modelWeight`, normalizes by estimated action cost, and executes the reordered actions through normal rollback and validation.
@@ -220,7 +229,7 @@ The optional key is read from the environment variable named by `modelApiKeyEnv`
 | Field | Default | Meaning |
 |---|---:|---|
 | `ai` | `false` | Enable model queries. |
-| `modelMode` | `"policy"` | `planner`, scored `policy`, or non-scoring `interactive`. |
+| `modelMode` | `"planner"` | `planner`, scored `policy`, or non-scoring `interactive`. |
 | `modelProvider` | `"none"` | `command`, `openai-compatible`, `ollama`, or `replay`. |
 | `modelTimeoutMs` | `1500` | Per-round provider budget, capped by the global deadline. |
 | `modelMaxRounds` | `4` | Interactive rounds at one node. |

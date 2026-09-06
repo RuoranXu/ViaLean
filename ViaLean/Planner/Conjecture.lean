@@ -8,10 +8,18 @@ open Lean Meta
 namespace ViaLean
 namespace ConjectureEngine
 
-private def thoughtId (id : String) : UInt64 :=
+def thoughtId (id : String) : UInt64 :=
   id.toNat?.map UInt64.ofNat |>.getD (hash id)
 
-private def resolveReference? (snap : GoalSnapshot) (reference : String) : MetaM (Option Expr) := do
+private def resolveReference? (snap : GoalSnapshot) (objects : Array WorkspaceObject)
+    (reference : String) : MetaM (Option Expr) := do
+  let objectText := if reference.startsWith "object:" then
+    String.ofList (reference.toList.drop 7)
+  else reference
+  if let some id := objectText.toNat? then
+    if let some object := objects.find? fun object =>
+        object.id == UInt64.ofNat id && object.status != .refuted then
+      return some object.expression
   if let some info := snap.locals.find? (toString ·.userName == reference) then
     return some (mkFVar info.fvarId)
   let name := reference.toName
@@ -26,13 +34,19 @@ private def originSource (thought : ModelProtocol.PlannerThoughtView) : String :
 /-- Compile open-world neural thoughts into independently validated proposal objects.
 The v2 DSL references existing locals/constants and never sends raw `Expr` values. -/
 def compile (snap : GoalSnapshot) (cfg : ProposeConfig)
-    (thoughts : Array ModelProtocol.PlannerThoughtView) : MetaM (Array Proposal × ModelThoughtBatch) :=
+    (thoughts : Array ModelProtocol.PlannerThoughtView)
+    (objects : Array WorkspaceObject := #[]) : MetaM (Array Proposal × ModelThoughtBatch) :=
   snap.goalId.withContext do
     let mut proposals : Array Proposal := #[]
     let mut acceptedThoughts : Array ModelThought := #[]
     for thought in thoughts do
+      let dependencyIds := thought.dependencies.map thoughtId
+      let dependenciesReady := dependencyIds.all fun id =>
+        acceptedThoughts.any (·.id == id) ||
+        objects.any fun object => object.id == id && object.status != .refuted
+      unless dependenciesReady do continue
       let saved ← saveState
-      let some term ← resolveReference? snap thought.expressionRef
+      let some term ← resolveReference? snap objects thought.expressionRef
         | saved.restore; continue
       let kind := thought.kind.trimAscii.toString.toLower
       let proposal? : Option Proposal ← try

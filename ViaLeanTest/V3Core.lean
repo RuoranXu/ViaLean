@@ -46,7 +46,7 @@ open Lean Meta Elab Tactic ViaLean
       response.leanCandidates == #["by exact h"]
   | .error _ => false
 
-syntax "v3_custom_tactic" : tactic
+syntax (name := v3CustomTactic) "v3_custom_tactic" : tactic
 macro_rules | `(tactic| v3_custom_tactic) => `(tactic| exact True.intro)
 
 elab "v3_sandbox_guard" : tactic => do
@@ -63,6 +63,9 @@ elab "v3_sandbox_guard" : tactic => do
       throwError "unsafe or unsupported model code passed: {code}"
   match parseSafeModelTactic env "by exact True.intro" with
   | .error error => throwError "reviewed exact tactic was rejected: {error}"
+  | .ok _ => pure ()
+  match parseSafeModelTacticWithKinds env "by v3_custom_tactic" #[`v3CustomTactic] with
+  | .error error => throwError "explicit syntax capability was rejected: {error}"
   | .ok _ => pure ()
 
 example : True := by

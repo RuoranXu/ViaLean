@@ -1,5 +1,7 @@
 import ViaLean.Config
 import ViaLean.Goal
+import ViaLean.Workspace
+import ViaLean.Search.Execute
 import Lean.Meta.Tactic.Apply
 import Lean.Meta.Tactic.Cases
 import Lean.Meta.Tactic.Contradiction
@@ -37,6 +39,41 @@ structure FrontierProbe where
 deriving Inhabited, Repr
 
 namespace FrontierEngine
+private def withFrontierLimits (action : MetaM α) : MetaM α :=
+  withOptions (fun options => options.setNat `maxRecDepth 1000) <|
+    withTheReader Core.Context
+      (fun context => { context with maxRecDepth := 1000, maxHeartbeats := 500000 }) <|
+        withCurrHeartbeats action
+
+private partial def containsConstName (needle : Name) : Expr → Bool
+  | .const name _ => name == needle
+  | .app fn arg => containsConstName needle fn || containsConstName needle arg
+  | .lam _ domain body _ | .forallE _ domain body _ =>
+      containsConstName needle domain || containsConstName needle body
+  | .letE _ type value body _ =>
+      containsConstName needle type || containsConstName needle value ||
+        containsConstName needle body
+  | .mdata _ body | .proj _ _ body => containsConstName needle body
+  | _ => false
+
+private def safeForEagerTransforms (target : Expr) : MetaM Bool := do
+  let target ← instantiateMVars target
+  if target.isForall || containsConstName ``Exists target then return false
+  for decl in ← getLCtx do
+    unless decl.isImplementationDetail do
+      let type ← instantiateMVars decl.type
+      if type.isForall || containsConstName ``Exists type then return false
+  return true
+
+private def safeEliminationType (type : Expr) : MetaM Bool := do
+  let type ← instantiateMVars type
+  return !type.isForall && !containsConstName ``Exists type
+
+private def isLogicalStructure (target : Expr) : Bool :=
+  target.isForall || target.isAppOfArity ``And 2 ||
+    target.isAppOfArity ``Or 2 || target.isAppOfArity ``Iff 2 ||
+    target.isAppOfArity ``Exists 2
+
 
 private def bounded (limit : Nat) (text : String) : String :=
   if text.length ≤ limit then text else (text.take limit).toString ++ "…"
@@ -94,7 +131,8 @@ private def observingProbe? (budget? : Option Budget) (work : IO.Ref Nat) (workL
   unless (← budgetOpen budget?) && (← consumeWork? work workLimit) do return none
   let saved ← saveState
   try
-    let result ← action
+    let result ← withFrontierLimits <|
+      ExecutionBoundary.withoutSpeculativeMessages action
     saved.restore
     if ← budgetOpen budget? then return result else return none
   catch _ =>
@@ -155,7 +193,8 @@ private def observingFuture (work : IO.Ref Nat) (workLimit : Nat)
   unless ← consumeWork? work workLimit do return #[]
   let saved ← saveState
   try
-    let result ← action
+    let result ← withFrontierLimits <|
+      ExecutionBoundary.withoutSpeculativeMessages action
     saved.restore
     return result
   catch _ =>
@@ -219,11 +258,13 @@ mutual
           expanded := expanded + 1
           result := result ++ branch
 
-      if expanded < cfg.frontierFutureWidth then
+      if expanded < cfg.frontierFutureWidth && !isLogicalStructure target &&
+          (← safeForEagerTransforms target) then
         let branch ← observingFuture work workLimit do
           let clone ← freshGoal target
           let simpCtx ← Simp.Context.mkDefault
-          let (simpResult, _) ← simpTargetStar clone simpCtx
+          let (simpResult, _) ← withFrontierLimits <|
+            simpTargetStar clone simpCtx
           match simpResult with
           | .closed => exploreFutureChildren #[] (depth + 1) path "simp" cfg chars budget? count work workLimit seen
           | .modified child => exploreFutureChildren #[child] (depth + 1) path "simp" cfg chars budget? count work workLimit seen
@@ -265,7 +306,8 @@ mutual
       for decl in locals do
         if expanded ≥ cfg.frontierFutureWidth then break
         let type ← instantiateMVars decl.type
-        if (← isProp type) && !type.isEq && !type.isHEq then
+        if (← isProp type) && !type.isEq && !type.isHEq &&
+            (← safeEliminationType type) then
           let branch ← observingFuture work workLimit do
             let clone ← freshGoal target
             let branches ← clone.cases decl.fvarId
@@ -308,24 +350,51 @@ deriving Inhabited
 
 /-- Produce at most one successful successor group per operator family. Successful
 groups stay in the surrounding observation state so breadth-first descendants remain live. -/
+private structure FutureSuccessor where
+  label : String
+  candidate : SymbolicTransitionCandidate
+  children : Array MVarId
+deriving Inhabited
+
+private def previewFamily (label : String) : StrategyFamily :=
+  if label.startsWith "rewrite:" then .equality
+  else if label.startsWith "cases:" then .elimination
+  else if label.startsWith "constructor:" then .construction
+  else if label.startsWith "apply:" then .backward
+  else if label == "simp" then .normalization
+  else if label == "intro" then .structural
+  else .mixed
+
+private def previewOperation (label : String) : SymbolicOperation :=
+  if label == "intro" then .intro
+  else if label == "simp" then .simplifyTarget
+  else .sketch #[]
+
 private def futureSuccessors
     (goal : MVarId) (cfg : ProposeConfig) (budget? : Option Budget)
-    (work : IO.Ref Nat) (workLimit : Nat) : MetaM (Array (String × Array MVarId)) :=
+    (work : IO.Ref Nat) (workLimit : Nat) : MetaM (Array FutureSuccessor) :=
   goal.withContext do
     let target ← instantiateMVars (← goal.getType)
     let mut locals : Array LocalDecl := #[]
     for decl in ← getLCtx do
       unless decl.isImplementationDetail do locals := locals.push decl
-    let tryBranch (operation : String) (action : MetaM (Array MVarId)) :
-        MetaM (Option (String × Array MVarId)) := do
+    let tryBranch (label : String) (action : MetaM (Array MVarId)) :
+        MetaM (Option FutureSuccessor) := do
       unless (← budgetOpen budget?) && (← consumeWork? work workLimit) do return none
       let saved ← saveState
       try
-        let children ← action
+        let children ← withFrontierLimits <|
+          ExecutionBoundary.withoutSpeculativeMessages action
         if children.size > cfg.frontierMaxChildren then
           saved.restore
           return none
-        return some (operation, children)
+        let family := previewFamily label
+        return some {
+          label
+          candidate := {
+            operation := previewOperation label, family, estimatedCost := Float.ofNat (max 1 children.size)
+            origin := .derived, fingerprint := hash ((← mkGoalKey goal).bucket, label) }
+          children }
       catch _ =>
         saved.restore
         return none
@@ -355,7 +424,8 @@ private def futureSuccessors
             break
 
     for decl in locals do
-      if (← isProp decl.type) && !decl.type.isEq && !decl.type.isHEq then
+      if (← isProp decl.type) && !decl.type.isEq && !decl.type.isHEq &&
+          (← safeEliminationType decl.type) then
         if let some branch ← tryBranch s!"cases:{decl.userName}" do
           let clone ← freshGoal target
           let cases ← clone.cases decl.fvarId
@@ -381,15 +451,8 @@ private def futureSuccessors
         groups := groups.push branch
         break
 
-    if let some branch ← tryBranch "simp" do
-      let clone ← freshGoal target
-      let simpCtx ← Simp.Context.mkDefault
-      let (simpResult, _) ← simpTargetStar clone simpCtx
-      match simpResult with
-      | .closed => return #[]
-      | .modified child => return #[child]
-      | .noChange => throwError "simp made no progress"
-    then groups := groups.push branch
+    -- Global simplification is offered by the flat normalization probes. Avoid
+    -- repeating the same expensive simp closure at every deep Atlas node.
     return groups
 
 /-- Breadth-first finite future. Every expanded node offers one slot to every family
@@ -419,23 +482,137 @@ private def exploreFutureBreadthFirst
         views := views.push view
         if item.depth < cfg.frontierFutureDepth then
           let groups ← futureSuccessors item.goal cfg budget? work workLimit
-          for (operation, children) in groups.take cfg.frontierFutureWidth do
-            if children.isEmpty then
+          for successor in groups.take cfg.frontierFutureWidth do
+            if successor.children.isEmpty then
               if views.size < cfg.frontierFutureNodes then
                 views := views.push {
                   depth := item.depth + 1
-                  path := item.path ++ "/" ++ operation
+                  path := item.path ++ "/" ++ successor.label
                   goal := "closed"
                   signals := #["symbolic transform closes this branch"]
                 }
             else
-              for index in [0:children.size] do
+              for index in [0:successor.children.size] do
                 queue := queue.push {
-                  goal := children[index]!
+                  goal := successor.children[index]!
                   depth := item.depth + 1
-                  path := s!"{item.path}/{operation}[{index}]"
+                  path := s!"{item.path}/{successor.label}[{index}]"
                 }
   return views
+
+structure AtlasExpansionRequest where
+  family? : Option StrategyFamily := none
+  maxDepth : Nat
+  maxWidthPerNode : Nat
+  workUnits : Nat
+  reason : String := "guaranteed-symbolic"
+deriving Inhabited
+
+structure AtlasExpansionResult where
+  fromVersion : Nat := 0
+  toVersion : Nat := 0
+  addedNodes : Nat := 0
+  addedTransitions : Nat := 0
+  metaOps : Nat := 0
+  visitedNodes : Nat := 0
+  queuedNodes : Nat := 0
+  completed : Bool := false
+  budgetDenied : Bool := false
+deriving Inhabited, Repr
+
+private structure AtlasQueueItem where
+  goal : MVarId
+  node : AtlasNodeId
+  depth : Nat
+deriving Inhabited
+
+/-- Expand the actual shared Atlas under one Meta observation transaction.  The queue
+is breadth-first and each node offers at most one candidate per operator family.
+All producers debit the same persistent Meta-operation counter. -/
+def expandWorkspace (workspace : IO.Ref ProofWorkspace) (snap : GoalSnapshot)
+    (cfg : ProposeConfig) (request : AtlasExpansionRequest)
+    (budget? : Option Budget := none) : MetaM AtlasExpansionResult :=
+  snap.goalId.withContext do
+    let before ← workspace.get
+    if request.workUnits = 0 || request.maxWidthPerNode = 0 ||
+        before.atlas.stats.metaOps >= cfg.atlasMaxMetaOps ||
+        !(← budgetOpen budget?) then
+      return {
+        fromVersion := before.version, toVersion := before.version
+        budgetDenied := true }
+    let root? := (before.atlas.nodeForKey? snap.key).map (·.id)
+    let root? ← match root? with
+      | some id => pure (some id)
+      | none => Workspace.observeGoal workspace cfg snap 0
+    let some root := root? | return {
+      fromVersion := before.version, toVersion := before.version, budgetDenied := true }
+    let saved ← saveState
+    try
+      let startWork := before.atlas.stats.metaOps
+      let workLimit := min cfg.atlasMaxMetaOps (startWork + request.workUnits)
+      let work ← IO.mkRef startWork
+      let mut queue : Array AtlasQueueItem := #[{ goal := snap.goalId, node := root, depth := 0 }]
+      let mut seen : StrictGoalSet := ({} : StrictGoalSet).insert snap.key
+      let mut cursor := 0
+      while cursor < queue.size && (← budgetOpen budget?) do
+        let item := queue[cursor]!
+        cursor := cursor + 1
+        if item.depth >= request.maxDepth || (← work.get) >= workLimit then continue
+        unless ← item.goal.isAssigned do
+          let successors ← futureSuccessors item.goal cfg budget? work workLimit
+          let successors := match request.family? with
+            | none => successors
+            | some preferred => successors.insertionSort fun left right =>
+                let leftPreferred := left.candidate.family == preferred
+                let rightPreferred := right.candidate.family == preferred
+                leftPreferred && !rightPreferred
+          for successor in successors.take request.maxWidthPerNode do
+            if (← work.get) > workLimit || !(← budgetOpen budget?) then break
+            let transition? ← Workspace.offerPreviewTransition
+              workspace cfg item.node successor.candidate
+            let some transition := transition? | continue
+            if successor.children.isEmpty then
+              Workspace.finishPreviewTransition workspace transition .solved
+            else
+              for child in successor.children.take cfg.frontierMaxChildren do
+                unless ← child.isAssigned do
+                  let childSnap ← snapshot child
+                  let childText ← renderGoal child
+                    (max 96 (cfg.atlasMaxRenderedChars / max 1 cfg.atlasMaxNodes))
+                  let (childId?, _) ← Workspace.observePreviewGoal
+                    workspace cfg childSnap (item.depth + 1) childText (some item.node)
+                  if let some childId := childId? then
+                    Workspace.linkPreviewChild workspace transition childId
+                    if !seen.contains childSnap.key &&
+                        item.depth + 1 < request.maxDepth then
+                      seen := seen.insert childSnap.key
+                      queue := queue.push {
+                        goal := child, node := childId, depth := item.depth + 1 }
+      let usedWork ← work.get
+      if usedWork > startWork then
+        discard <| Workspace.reserveMetaOp workspace cfg (usedWork - startWork)
+      saved.restore
+      let after ← workspace.get
+      return {
+        fromVersion := before.version
+        toVersion := after.version
+        addedNodes := after.atlas.nodes.size - min before.atlas.nodes.size after.atlas.nodes.size
+        addedTransitions :=
+          after.atlas.transitions.size - min before.atlas.transitions.size after.atlas.transitions.size
+        metaOps := usedWork - startWork
+        visitedNodes := cursor
+        queuedNodes := queue.size
+        completed := (← budgetOpen budget?) && usedWork < workLimit
+      }
+    catch _ =>
+      saved.restore
+      let after ← workspace.get
+      return {
+        fromVersion := before.version, toVersion := after.version
+        addedNodes := after.atlas.nodes.size - min before.atlas.nodes.size after.atlas.nodes.size
+        addedTransitions :=
+          after.atlas.transitions.size - min before.atlas.transitions.size after.atlas.transitions.size
+      }
 
 private def deepFutureProbe?
     (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
@@ -454,14 +631,21 @@ private def normalizationProbes
   let mut probes := #[]
   unless ← consumeWork? work workLimit do return #[]
   let reduced ← whnf snap.target
+  if isLogicalStructure reduced then
+    let result := if reduced == snap.target then "stable" else "changed"
+    return #[{ (makeProbe "normalization" "whnf-structure" "target" result
+      #[← renderGoal snap.goalId chars]) with executable := false }]
   unless reduced == snap.target do
     probes := probes.push <| makeProbe "normalization" "whnf" "target" "changed"
       #[← renderExpr reduced chars]
 
+  unless ← safeForEagerTransforms reduced do return probes
+
   if let some probe ← observingProbe? budget? work workLimit do
     let goal ← freshGoal snap.target
     let simpCtx ← Simp.Context.mkDefault
-    let (result, _) ← simpTargetStar goal simpCtx
+    let (result, _) ← withFrontierLimits <|
+      simpTargetStar goal simpCtx
     match result with
     | .closed => return some { (makeProbe "normalization" "simp-target-star" "local propositions" "closed") with executable := true }
     | .modified child =>
@@ -474,7 +658,8 @@ private def normalizationProbes
     let goal ← freshGoal snap.target
     let simpCtx ← Simp.Context.mkDefault
     let propHyps ← getPropHyps
-    let (result?, _) ← simpGoal goal simpCtx (fvarIdsToSimp := propHyps)
+    let (result?, _) ← withFrontierLimits <|
+      simpGoal goal simpCtx (fvarIdsToSimp := propHyps)
     match result? with
     | none => return some { (makeProbe "normalization" "simp-context" "all proposition hypotheses" "closed") with executable := true }
     | some (_, child) =>
@@ -531,7 +716,8 @@ private def eliminationProbes
   for info in snap.locals do
     unless ← budgetOpen budget? do break
     if probes.size ≥ cfg.frontierMaxPerPerspective then break
-    if (← isProp info.type) && !info.type.isEq && !info.type.isHEq then
+    if (← isProp info.type) && !info.type.isEq && !info.type.isHEq &&
+        (← safeEliminationType info.type) then
       if let some probe ← observingProbe? budget? work workLimit do
         let goal ← freshGoal snap.target
         let branches ← goal.cases info.fvarId

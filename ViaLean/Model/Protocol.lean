@@ -241,6 +241,24 @@ structure PlannerObservationView where
   failureClass? : Option String := none
 deriving Inhabited, Repr
 
+structure PlannerObjectView where
+  id : String
+  kind : String
+  status : String
+  expression : String
+  type? : Option String := none
+  blockers : Array String := #[]
+  utility : Float := 0.5
+deriving Inhabited, Repr
+structure PlannerMemoryView where
+  lastSeenVersion : Nat := 0
+  observationCount : Nat := 0
+  primaryFamily? : Option String := none
+  objective? : Option String := none
+  confidence : Float := 0.5
+deriving Inhabited, Repr
+
+
 structure PlannerRequestV2 where
   requestId : String
   workspaceVersion : Nat
@@ -250,6 +268,8 @@ structure PlannerRequestV2 where
   nodes : Array PlannerNodeView := #[]
   transitions : Array PlannerTransitionView := #[]
   observations : Array PlannerObservationView := #[]
+  objects : Array PlannerObjectView := #[]
+  memory : PlannerMemoryView := {}
 deriving Inhabited, Repr
 
 structure PlannerRegionScore where
@@ -267,12 +287,17 @@ deriving Inhabited, Repr
 structure StrategyPlan where
   primaryFamily? : Option String := none
   objective? : Option String := none
+  secondaryFamilies : Array String := #[]
+  horizon : Nat := 1
+  stopCondition? : Option String := none
 deriving Inhabited, Repr
 
 structure ExpansionRequest where
   regionId : String
   extraDepth : Nat := 0
   family? : Option String := none
+  extraWidth : Nat := 1
+  reasonCode? : Option String := none
 deriving Inhabited, Repr
 
 structure PlannerThoughtView where
@@ -314,9 +339,21 @@ private def plannerObservationToJson (observation : PlannerObservationView) : Js
   ("outcome", observation.outcome),
   ("class", observation.failureClass?.map Json.str |>.getD Json.null)]
 
+private def plannerObjectToJson (object : PlannerObjectView) : Json := Json.mkObj [
+  ("id", object.id), ("kind", object.kind), ("status", object.status),
+  ("expression", object.expression),
+  ("type", object.type?.map Json.str |>.getD Json.null),
+  ("blockers", toJson object.blockers), ("utility", toJson object.utility)]
+
 def plannerRequestToJson (request : PlannerRequestV2) : Json := Json.mkObj [
   ("version", plannerVersion), ("request_id", request.requestId),
   ("workspace_version", request.workspaceVersion),
+  ("delta", Json.mkObj [
+    ("from_version", request.memory.lastSeenVersion),
+    ("to_version", request.workspaceVersion),
+    ("previous_primary_family",
+      request.memory.primaryFamily?.map Json.str |>.getD Json.null),
+    ("previous_confidence", toJson request.memory.confidence)]),
   ("budget", Json.mkObj [("remaining_ms", request.budget.remainingMs),
     ("remaining_atlas_work", request.budget.remainingAtlasWork)]),
   ("root", Json.mkObj [("id", request.root.id), ("shape", request.root.shape),
@@ -324,7 +361,8 @@ def plannerRequestToJson (request : PlannerRequestV2) : Json := Json.mkObj [
   ("regions", Json.arr (request.regions.map plannerRegionToJson)),
   ("nodes", Json.arr (request.nodes.map plannerNodeToJson)),
   ("transitions", Json.arr (request.transitions.map plannerTransitionToJson)),
-  ("observations", Json.arr (request.observations.map plannerObservationToJson))]
+  ("observations", Json.arr (request.observations.map plannerObservationToJson)),
+  ("objects", Json.arr (request.objects.map plannerObjectToJson))]
 
 def plannerRequestText (request : PlannerRequestV2) : String :=
   (plannerRequestToJson request).compress
@@ -335,6 +373,8 @@ partial def plannerRequestTextCapped (request : PlannerRequestV2) (maxChars : Na
   if text.length <= maxChars then text
   else if !request.observations.isEmpty then
     plannerRequestTextCapped { request with observations := request.observations.extract 1 request.observations.size } maxChars
+  else if request.objects.size > 1 then
+    plannerRequestTextCapped { request with objects := request.objects.extract 0 (request.objects.size / 2) } maxChars
   else if request.nodes.size > request.regions.size && request.nodes.size > 1 then
     plannerRequestTextCapped { request with nodes := request.nodes.extract 0 (request.nodes.size / 2) } maxChars
   else if request.transitions.size > 1 then
@@ -375,7 +415,13 @@ def parsePlannerResponse (text : String) (maxItems : Nat := 64) : Except String 
   let strategy : StrategyPlan := match json.getObjVal? "strategy" with
     | .ok value => {
         primaryFamily? := (value.getObjVal? "primary_family").toOption.bind (·.getStr?.toOption)
-        objective? := (value.getObjVal? "objective").toOption.bind (·.getStr?.toOption) }
+        objective? := (value.getObjVal? "objective").toOption.bind (·.getStr?.toOption)
+        secondaryFamilies := (value.getObjVal? "secondary_families").toOption.bind
+          (·.getArr?.toOption) |>.map (·.filterMap (·.getStr?.toOption)) |>.getD #[]
+        horizon := (value.getObjVal? "horizon").toOption.bind
+          (fun item => (fromJson? item : Except String Nat).toOption) |>.getD 1
+        stopCondition? := (value.getObjVal? "stop_condition").toOption.bind
+          (·.getStr?.toOption) }
     | .error _ => ({} : StrategyPlan)
   let mut expansionRequests : Array ExpansionRequest := #[]
   if let .ok value := json.getObjVal? "expansion_requests" then
@@ -385,9 +431,15 @@ def parsePlannerResponse (text : String) (maxItems : Nat := 64) : Except String 
           if let .ok regionId := idJson.getStr? then
             let extraDepth := (item.getObjVal? "extra_depth").toOption.bind fun v =>
               (fromJson? v : Except String Nat).toOption
+            let extraWidth := (item.getObjVal? "extra_width").toOption.bind fun v =>
+              (fromJson? v : Except String Nat).toOption
             let family? := (item.getObjVal? "family").toOption.bind (·.getStr?.toOption)
+            let reasonCode? :=
+              ((item.getObjVal? "reason_code").toOption.bind (·.getStr?.toOption)).orElse
+                (fun _ => (item.getObjVal? "reason").toOption.bind (·.getStr?.toOption))
             expansionRequests := expansionRequests.push {
-              regionId, extraDepth := extraDepth.getD 0, family? }
+              regionId, extraDepth := extraDepth.getD 0
+              extraWidth := extraWidth.getD 1, family?, reasonCode? }
   let mut thoughts : Array PlannerThoughtView := #[]
   if let .ok value := json.getObjVal? "thoughts" then
     if let .ok items := value.getArr? then

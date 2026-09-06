@@ -50,7 +50,7 @@ ViaLean supports local command adapters, OpenAI-compatible APIs, Ollama/llama.cp
 - `modelMode := "policy"` keeps the v1 value/action-scoring compatibility path.
 - `modelMode := "interactive"` keeps dense non-scoring feedback and finite symbolic futures. It may select existing actions/probes and, when explicitly enabled, submit complete or partial Lean tactics.
 
-Raw model tactic text is untrusted and disabled by default. It runs only when both `modelLeanCode` and `experimentalRawLeanCode` are true. ViaLean accepts an exact allowlist of reviewed core syntax kinds, rejects commands, `run_tac`, evaluation/native execution, option overrides, macros and extensions, and runs accepted code with an independent heartbeat limit on a fresh goal. Failed candidates restore metavariable state; every successful result still passes the no-`sorry`, no-metavariable final boundary. Provider output is bounded while streamed, and over-limit processes are terminated.
+Raw model tactic text is untrusted and disabled by default. It runs only when both `modelLeanCode` and `experimentalRawLeanCode` are true. ViaLean accepts an exact allowlist of reviewed core syntax kinds. Trusted routers may add exact parser-node capabilities; the mathlib adapter grants only its reviewed arithmetic/automation tactics. Commands, `run_tac`, evaluation/native execution, option overrides, and ungranted extensions remain rejected. Accepted code runs with an independent heartbeat limit on a fresh goal. Failed candidates restore metavariable state; every successful result still passes the no-`sorry`, no-metavariable final boundary. Provider output is bounded while streamed, and over-limit processes are terminated.
 
 See [Model guidance](docs/MODEL_GUIDANCE.md) for both protocols, or [model_adapter.py](examples/model_adapter.py) for a zero-dependency adapter.
 
@@ -76,7 +76,38 @@ lake test
 
 The repository has no Lake package dependency. API mode additionally requires `curl`; command mode requires only the configured adapter. Toolchain selection is explicit for reproducible builds, while the implementation contains no Lean release-number checks or per-version branches.
 
+Mathlib support is an isolated integration, so importing the core does not force
+downstream projects to download mathlib:
+
+```console
+cd integration/mathlib
+lake update
+lake exe cache get
+lake test
+```
+
+It pins Lean/mathlib 4.27.0 and the Google DeepMind Lean 4 miniF2F revision, adds a trusted mathlib leaf portfolio, exposes `propose_mathlib`, and emits per-case `vialean.dataset.v1` JSON records.
+
 See [VIALEAN_IMPLEMENTATION.md](VIALEAN_IMPLEMENTATION.md) for the module map and safety invariants.
+
+## Evaluation and traces
+
+ViaLean.Benchmark provides eight matched-compute modes spanning native-only, symbolic actions, flat frontier, graph Atlas, policy, policy+value, planner expansion, and opt-in raw interaction. Results use the stable vialean.benchmark.v3 JSONL schema and include latency, proof attempts, model calls, replans, Atlas size, and Meta work. The root regression corpus in ViaLeanTest/StdDataset.lean is **not miniF2F**: it replays six theorem shapes from the Lean 4 Init/Std sources without importing their proofs or adding mathlib.
+
+The separate `integration/mathlib` suite contains real Lean 4 miniF2F valid/test
+statements. It imports only the upstream problem environment, never the files
+that declare the target theorems with `sorry`, and disables library retrieval on
+the miniF2F cases to prevent answer leakage. Run `lake env lean ViaLeanMathlibTest/MiniF2F.lean` inside that subproject to force the six cases and stream their JSONL records.
+
+On the full 244-problem miniF2F test split, the current mathlib integration solves
+122 problems (50.0%) under the repository's local search profiles, up from 112
+(45.9%) in the previous internal baseline. This is a kernel-checked, model-free
+snapshot rather than a claim about model-assisted performance; machine, timeout,
+and model settings should be reported when comparing runs.
+
+Set traceJsonlPath to emit the redacted vialean.training.v3 event stream. Events contain stable IDs, counts, decisions, outcomes, and failure classes; raw goals, local names, API keys, and internal Lean expressions are deliberately excluded. traceMaxEvents bounds the retained stream.
+
+See [Benchmark and corpus notes](benchmarks/README.md) for scope, provenance, and fair-compute rules.
 
 ## License
 
