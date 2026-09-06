@@ -1,6 +1,7 @@
 # ViaLean
 
-ViaLean is an independent, kernel-checked persistent neural-symbolic co-search engine implemented in Lean 4. Lean continuously builds and verifies a bounded proof workspace; a model can plan over that graph, create typed intermediate bridges, or (in an explicit experimental mode) propose Lean code. Lean's kernel remains the only proof authority.
+ViaLean is an independent, kernel-checked persistent neural-symbolic co-search engine implemented in Lean 4. Lean continuously builds and verifies a bounded proof workspace; a model can plan over that graph, create typed intermediate bridges, or (in an explicit experimental mode) propose Lean code. Lean's kernel remains the only proof authority. 纯符号pass@1 MiniF2F数据集50%正确率和大参数模型效果近似 - DeepSeek‑Prover‑V1.5‑RL：50.0%
+- Goedel‑Prover‑V1‑SFT：57.6%
 
 ## Design
 
