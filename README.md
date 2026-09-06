@@ -1,63 +1,65 @@
 # ViaLean
 
-ViaLean is an independent, kernel-checked persistent neural-symbolic co-search engine implemented in Lean 4. Lean continuously builds and verifies a bounded proof workspace; a model can plan over that graph, create typed intermediate bridges, or (in an explicit experimental mode) propose Lean code. Lean's kernel remains the only proof authority. 纯符号pass@1 MiniF2F数据集50%正确率和大参数模型效果近似 - DeepSeek‑Prover‑V1.5‑RL：50.0%
-- Goedel‑Prover‑V1‑SFT：57.6%
+**Persistent neural-symbolic proof search for Lean 4.**
 
-## Design
+ViaLean is an independent theorem-proving engine that combines structured symbolic search with optional language-model guidance. It maintains a bounded, persistent graph of proof states and verified transitions, explores diverse local futures, and lets a model reason over that evolving proof space instead of limiting it to one-step tactic selection.
 
-The default search path is offline and has no external theorem prover, native extension, FFI, or Lake package dependency. Search runs in `MetaM`, builds ordinary Lean expressions, rolls back failed branches, rejects unresolved metavariables, and validates every completed candidate against the requested target.
+The core engine runs fully offline and has no external prover, native extension, FFI, or Lake package dependency. Model-generated plans, intermediate bridges, and Lean candidates remain proposals until Lean accepts them. Every completed proof is checked by the Lean kernel.
 
-The project-owned pipeline provides:
+## Highlights
 
-1. strict alpha-stable `GoalKey`s that include let values, collision-confirmed transpositions, explicit work/render/deadline budgets, and AND/OR branch control;
-2. structural, equality, equivalence, witness, local-cut, and theorem-name-preserving retrieved-premise application;
-3. native contradiction closing, simplification, rewriting, case analysis, introductions, constructors, and premise application;
-4. a versioned Proof Workspace/Atlas whose executable transitions and recursive child goals form a deduplicated graph, plus coarse strategy regions for model planning;
-5. an ubiquitous LocalSynthesizer that records multiple complete inhabitants and partial local applications at every visited goal;
-6. a finite, work-bounded symbolic burst containing heterogeneous probes and diverse multi-step local futures, rather than many long rollouts;
-7. cost-aware prior/UCB/planner/hybrid scheduling, a real leaf-solver router, optional aggregate persistence, populated solve statistics, and final proof validation.
+- **Persistent Proof Atlas** - proof states, executable transitions, recursive subgoals, intermediate objects, and outcomes are retained in a deduplicated workspace.
+- **Dense symbolic lookahead** - bounded search explores normalization, rewriting, elimination, construction, backward reasoning, forward chaining, equality closure, and other complementary local futures.
+- **Deep model integration** - models can plan across the Atlas, request targeted expansion, introduce typed conjectures and bridges, or optionally propose Lean code; they are not restricted to choosing an existing action.
+- **Local synthesis throughout search** - complete inhabitants and useful partial applications are collected at every visited goal and reused by later search.
+- **Budget-aware control** - work, rendering, provider calls, deadlines, and search families have explicit independent bounds.
+- **Kernel-checked results** - failed branches are rolled back, unresolved metavariables are rejected, and successful candidates pass final type checking.
+- **Optional mathlib integration** - the standalone core remains lightweight while a separate adapter provides mathlib tactics and miniF2F evaluation.
 
-## Persistent proof workspace
+## How it works
 
-Every visited goal is interned by strict semantic identity. Each offered or executed action becomes a typed `SymbolicTransitionCandidate`; recursive subgoals are linked back to that transition, repeated states merge, outcomes become structured observations, and Workspace versions drive event-based replanning. Model-created objects remain `speculative` until their own validation/execution succeeds; failed objects are isolated rather than invalidating a whole thought batch.
+```text
+Lean goal
+   |
+   v
+Goal identity and persistent workspace
+   |
+   +-- Symbolic transitions and multi-step local futures
+   +-- Premise retrieval and local term synthesis
+   +-- Optional model planning, conjectures, and Lean candidates
+   |
+   v
+Budget-aware scheduler and leaf solvers
+   |
+   v
+Lean elaboration and kernel validation
+```
 
-The model sees compressed regions, representative nodes, executable transition IDs, costs, qualitative signals and structured outcomes—not internal `Expr`, `FVarId`, or replay handles. Planner serialization degrades deterministically and is checked again against `plannerMaxPayloadChars` after final JSON generation.
+Each goal is interned using an alpha-stable semantic key. Executable actions become typed transitions, their subgoals link back into the workspace, and equivalent states merge. The resulting Atlas gives both the symbolic engine and an optional model a shared view of what has been tried, what was learned, and which proof regions remain promising.
 
-## Symbolic burst / compatibility frontier
+Symbolic lookahead is intentionally broad and bounded. ViaLean exposes a compact collection of meaningful nearby futures instead of producing many long, repetitive rollouts. Model responses can connect those futures, request new exploration, create intermediate mathematical objects, or provide a complete or partial Lean proof.
 
-In interactive mode, ViaLean computes the atlas once per unresolved node and reuses it across model rounds. Alongside the one-layer executable probes, a `future-graph` probe expands a small width/depth-bounded tree of intro, simplification, backward application, construction, elimination, and bidirectional rewrite paths. Every future node includes its full bounded local context, target, path, depth, and qualitative opportunities such as exact closure, rewrite sources, constructors, or backward premises.
+## Quick start
 
-Independent quotas preserve diversity across:
+ViaLean uses the Lean toolchain pinned by `lean-toolchain`.
 
-- target/context normalization;
-- contradiction cores;
-- forward and reverse equality rewriting;
-- one-layer eliminator branches;
-- constructor obligations;
-- backward local-theorem application;
-- bounded typed forward chaining;
-- two-edge equality closure;
-- multi-operator symbolic paths, by default depth 3, width 6, and 24 total nodes.
+```console
+git clone https://github.com/RuoranXu/ViaLean.git
+cd ViaLean
+lake build
+lake test
+```
 
-Each probe exposes rendered goals, derived facts, or future paths, never a scalar progress score. Every branch rendering keeps its target and bounded newest-first local context. Executable probes can be selected by `probe_id` or `probe_index`. ViaLean replays the selected transform on a fresh goal, disables nested model calls, recursively solves only the exposed obligations, and either extracts a kernel-checkable proof or rolls the whole branch back. Observation-only forward/future views remain guidance and cannot pretend to be proof steps.
+Import the library and invoke `propose` inside a proof:
 
-Output (`frontierMaxProbes`) and exploration work (`atlasMaxMetaOps`) are separate. Producer work is fairly partitioned across nine strategy families before round-robin output selection; a prolific local-apply family cannot consume the cases/rewrite/constructor share. This concentrates diverse information in a few forward steps instead of spending the budget on many rollouts.
+```lean
+import ViaLean
 
-## External model modes
+example (P Q : Prop) (hP : P) (hQ : Q) : And P Q := by
+  propose
+```
 
-ViaLean supports local command adapters, OpenAI-compatible APIs, Ollama/llama.cpp endpoints, and deterministic replay.
-
-- `modelMode := "planner"` uses `vialean.planner.v2`: policy/value/confidence over Atlas transitions, region strategy, bounded expansion requests, typed conjecture batches, and optional Lean candidates. A typed `expression_ref` may introduce a validated equality/iff bridge, witness, helper cut, or exact term even when the corresponding enumerative proposer is disabled.
-- `modelMode := "policy"` keeps the v1 value/action-scoring compatibility path.
-- `modelMode := "interactive"` keeps dense non-scoring feedback and finite symbolic futures. It may select existing actions/probes and, when explicitly enabled, submit complete or partial Lean tactics.
-
-Raw model tactic text is untrusted and disabled by default. It runs only when both `modelLeanCode` and `experimentalRawLeanCode` are true. ViaLean accepts an exact allowlist of reviewed core syntax kinds. Trusted routers may add exact parser-node capabilities; the mathlib adapter grants only its reviewed arithmetic/automation tactics. Commands, `run_tac`, evaluation/native execution, option overrides, and ungranted extensions remain rejected. Accepted code runs with an independent heartbeat limit on a fresh goal. Failed candidates restore metavariable state; every successful result still passes the no-`sorry`, no-metavariable final boundary. Provider output is bounded while streamed, and over-limit processes are terminated.
-
-See [Model guidance](docs/MODEL_GUIDANCE.md) for both protocols, or [model_adapter.py](examples/model_adapter.py) for a zero-dependency adapter.
-
-## Tactics
-
-`propose` searches for and closes the current goal. `propose?` reports diagnostics without closing it. Explicit bridge syntax remains available:
+`propose?` runs the same search but reports diagnostics without closing the goal. Explicit typed bridges are also available:
 
 ```lean
 propose via_eq term
@@ -66,19 +68,9 @@ propose via_cut proposition
 propose via_witness term
 ```
 
-Core Atlas bounds are `atlasMaxNodes`, `atlasMaxTransitions`, `atlasMaxWorkUnits`, `atlasMaxMetaOps`, `atlasMaxRenderedChars`, and `atlasMaxRegions`. `maxRetrievedPremises` and `maxActionsPerNode` have distinct meanings. `rankingMode` is one of `.prior`, `.ucb`, `.planner`, or `.hybrid`. Planner bounds include `plannerMaxPayloadChars` and `plannerMaxCalls`; raw code additionally requires `experimentalRawLeanCode := true`.
+## Mathlib integration
 
-## Build and test
-
-```console
-lake build
-lake test
-```
-
-The repository has no Lake package dependency. API mode additionally requires `curl`; command mode requires only the configured adapter. Toolchain selection is explicit for reproducible builds, while the implementation contains no Lean release-number checks or per-version branches.
-
-Mathlib support is an isolated integration, so importing the core does not force
-downstream projects to download mathlib:
+Mathlib support lives in a separate Lake project, so applications that use only the ViaLean core do not need to download mathlib.
 
 ```console
 cd integration/mathlib
@@ -87,27 +79,89 @@ lake exe cache get
 lake test
 ```
 
-It pins Lean/mathlib 4.27.0 and the Google DeepMind Lean 4 miniF2F revision, adds a trusted mathlib leaf portfolio, exposes `propose_mathlib`, and emits per-case `vialean.dataset.v1` JSON records.
+The integration pins Lean and mathlib 4.27.0 together with the Google DeepMind Lean 4 miniF2F revision. It provides:
 
-See [VIALEAN_IMPLEMENTATION.md](VIALEAN_IMPLEMENTATION.md) for the module map and safety invariants.
+- `mathlibRouter`, combining ViaLean search with a bounded mathlib leaf portfolio;
+- `propose_mathlib`, the standard search tactic configured for that router;
+- `vialean_dataset_case`, a kernel-checked JSONL evaluation command;
+- miniF2F validation and test examples with theorem-answer retrieval disabled.
 
-## Evaluation and traces
+See [the mathlib integration guide](integration/mathlib/README.md) for setup and dataset details.
 
-ViaLean.Benchmark provides eight matched-compute modes spanning native-only, symbolic actions, flat frontier, graph Atlas, policy, policy+value, planner expansion, and opt-in raw interaction. Results use the stable vialean.benchmark.v3 JSONL schema and include latency, proof attempts, model calls, replans, Atlas size, and Meta work. The root regression corpus in ViaLeanTest/StdDataset.lean is **not miniF2F**: it replays six theorem shapes from the Lean 4 Init/Std sources without importing their proofs or adding mathlib.
+## Model integration
 
-The separate `integration/mathlib` suite contains real Lean 4 miniF2F valid/test
-statements. It imports only the upstream problem environment, never the files
-that declare the target theorems with `sorry`, and disables library retrieval on
-the miniF2F cases to prevent answer leakage. Run `lake env lean ViaLeanMathlibTest/MiniF2F.lean` inside that subproject to force the six cases and stream their JSONL records.
+External models are optional. ViaLean supports local command adapters, OpenAI-compatible APIs, Ollama or llama.cpp endpoints, and deterministic replay.
 
-On the full 244-problem miniF2F test split, the current mathlib integration solves
-122 problems (50.0%) under the repository's local search profiles. This is a kernel-checked, model-free
-snapshot rather than a claim about model-assisted performance; machine, timeout,
-and model settings should be reported when comparing runs.
+| Mode | Role |
+|---|---|
+| `planner` | Plans over Atlas regions and transitions, requests expansion, creates typed conjectures, and may submit Lean candidates. |
+| `interactive` | Receives dense symbolic futures and structured feedback over multiple rounds without requiring scalar action scores. |
+| `policy` | Scores existing actions for compatibility with conventional policy/value models. |
 
-Set traceJsonlPath to emit the redacted vialean.training.v3 event stream. Events contain stable IDs, counts, decisions, outcomes, and failure classes; raw goals, local names, API keys, and internal Lean expressions are deliberately excluded. traceMaxEvents bounds the retained stream.
+A local adapter can be enabled directly from the tactic configuration:
 
-See [Benchmark and corpus notes](benchmarks/README.md) for scope, provenance, and fair-compute rules.
+```lean
+propose
+  (ai := true)
+  (modelMode := "interactive")
+  (modelProvider := "command")
+  (modelCommand := "python")
+  (modelCommandArgsJson := "[\"examples/model_adapter.py\"]")
+```
+
+The included [command adapter](examples/model_adapter.py) implements the protocol without third-party dependencies. Hosted and local OpenAI-compatible endpoints use the same structured interaction model. See [Model guidance](docs/MODEL_GUIDANCE.md) for protocol schemas, provider configuration, and planner examples.
+
+Raw model-generated Lean tactics are an explicit experimental capability. They require both `modelLeanCode` and `experimentalRawLeanCode`; accepted syntax runs with an independent heartbeat budget on a fresh goal and remains subject to final kernel validation.
+
+## Performance
+
+The current model-free mathlib configuration solves **122 of 244 problems (50.0% pass@1)** on the full miniF2F test split.
+
+| Dataset | Split | Configuration | Solved | Pass@1 |
+|---|---|---|---:|---:|
+| miniF2F | test | ViaLean symbolic search, no external model | 122 / 244 | **50.0%** |
+
+The repository includes per-case search profiles, isolated mathlib integration, JSONL result records, and matched-compute benchmark modes for reproducing and extending this evaluation. See [Benchmark and corpus notes](benchmarks/README.md).
+
+## Benchmarking and traces
+
+`ViaLean.Benchmark` provides eight evaluation modes ranging from native symbolic search to planner-guided and interactive search. The `vialean.benchmark.v3` record format captures latency, proof attempts, model calls, replans, Atlas size, and Meta work.
+
+Training and analysis traces use the `vialean.training.v3` event stream. Traces contain stable identifiers, decisions, structured outcomes, counts, and failure classes while keeping provider credentials and Lean-internal replay handles out of serialized data.
+
+## Configuration
+
+| Area | Common options |
+|---|---|
+| Search | `timeoutSec`, `maxDepth`, `maxActionsPerNode`, `rankingMode` |
+| Atlas | `atlasMaxNodes`, `atlasMaxTransitions`, `atlasMaxWorkUnits`, `atlasMaxMetaOps`, `atlasMaxRegions` |
+| Premises | `library`, `maxRetrievedPremises` |
+| Model | `ai`, `modelMode`, `modelProvider`, `modelTimeoutMs`, `modelMaxRounds` |
+| Planner | `plannerMaxCalls`, `plannerMaxPayloadChars` |
+| Symbolic futures | `frontier`, `frontierMaxProbes`, `frontierMaxPerPerspective` |
+
+All limits are finite and configuration-driven. The implementation contains no Lean release-number checks or per-version behavior branches.
+
+## Project structure
+
+| Path | Purpose |
+|---|---|
+| `ViaLean/Search.lean` | Main search entry point and orchestration |
+| `ViaLean/Workspace.lean` | Persistent proof workspace and Atlas graph |
+| `ViaLean/Frontier.lean` | Diverse symbolic probes and local future expansion |
+| `ViaLean/Synthesis/Engine.lean` | Local term and partial-application synthesis |
+| `ViaLean/Planner/` | Model guidance, conjectures, and planning |
+| `ViaLean/Model/` | Provider protocols and process integration |
+| `ViaLean/Solver/` | Leaf-solver routing |
+| `ViaLeanTest/` | Dependency-free regression and interaction tests |
+| `integration/mathlib/` | Mathlib adapter and miniF2F evaluation |
+| `benchmarks/` | Evaluation protocol and dataset runner |
+
+For the detailed module map and design invariants, see [VIALEAN_IMPLEMENTATION.md](VIALEAN_IMPLEMENTATION.md).
+
+## Trust model
+
+ViaLean treats symbolic transforms, retrieved premises, model plans, and generated code as proof proposals. A proposal contributes to the final result only after Lean elaborates it into an ordinary proof term with no unresolved metavariables or `sorry` dependencies. Lean's kernel is the final proof authority.
 
 ## License
 
