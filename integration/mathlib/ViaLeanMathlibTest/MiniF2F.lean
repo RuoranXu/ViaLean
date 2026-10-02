@@ -47,3 +47,11 @@ example (s t : ℝ) (h₀ : s = 9 - 2 * t) (h₁ : t = 3 * s + 1) :
     And (s = 1) (t = 4) := by
   vialean_dataset_case "miniF2F" "test" "mathd_algebra_44"
     (timeoutSec := 15) (library := false)
+
+-- test: mathd_algebra_209; exercises bounded equality transport through an
+-- equivalence without retrieving the upstream theorem.
+set_option linter.unusedVariables false in
+example (σ : ℝ ≃ ℝ) (h₀ : σ.symm 2 = 10) (h₁ : σ.symm 10 = 1)
+    (h₂ : σ.symm 1 = 2) : σ (σ 10) = 1 := by
+  vialean_dataset_case "miniF2F" "test" "mathd_algebra_209"
+    (timeoutSec := 15) (library := false)

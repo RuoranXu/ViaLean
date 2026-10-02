@@ -11,12 +11,12 @@ deriving BEq, Repr, Inhabited
 
 structure ProposeConfig where
   timeoutSec             : Nat := 10
-  directProbeSec         : Nat := 1
+  directProbeSec         : Nat := 2
   candidateProbeSec      : Nat := 1
   finalDirectMinSec      : Nat := 2
   maxDepth               : Nat := 2
   maxCandidates          : Nat := 12
-  maxRetrievedPremises   : Nat := 12
+  maxRetrievedPremises   : Nat := 24
   maxActionsPerNode      : Nat := 32
   maxCandidatesPerFamily : Nat := 4
   maxProposalSize        : Nat := 120
@@ -76,7 +76,9 @@ structure ProposeConfig where
   nativeMaxDepth         : Nat := 8
   nativeMaxApplications  : Nat := 256
   nativeTransforms        : Bool := true
+  nativeEquivTransport    : Bool := true
   nativeCases             : Bool := true
+  nativeInduction         : Bool := true
   nativeMaxCaseBranches   : Nat := 6
   frontier                : Bool := true
   atlasGraph              : Bool := true

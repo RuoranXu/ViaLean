@@ -1,4 +1,5 @@
 import ViaLean.Solver.Native
+import ViaLean.Proposal
 
 open Lean Meta
 
@@ -12,6 +13,9 @@ structure LeafRouter where
   the experimental model-code path. Forbidden syntax always remains forbidden;
   the dependency-free router grants no extensions. -/
   modelSyntaxKinds : Array Name := #[]
+  /-- Integration-supplied symbolic transitions enter the ordinary action,
+  Atlas, scheduler, and model-guidance pipeline; they are not opaque solvers. -/
+  symbolicProposals : GoalSnapshot → MetaM (Array Proposal) := fun _ => pure #[]
   /-- A stable policy hook for future portfolios. -/
   stopAfterSolved : Bool := true
 
@@ -37,7 +41,8 @@ def LeafRouter.solve
       tryBackend backend {
         request with budgetMs := request.budgetMs - elapsed
       }
-    catch _ =>
+    catch error =>
+      if error.isInterrupt then throw error
       setMCtx saved
       pure {
         backend := backend.kind

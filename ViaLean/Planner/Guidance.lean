@@ -15,6 +15,7 @@ structure PlannerDecision where
   strategy : ModelProtocol.StrategyPlan := {}
   confidence : Float := 0.5
   expansionResults : Array FrontierEngine.AtlasExpansionResult := #[]
+  thoughtUpdates : Nat := 0
 deriving Inhabited
 
 private def bounded (limit : Nat) (text : String) : String :=
@@ -67,6 +68,15 @@ def buildRequest (workspaceRef : IO.Ref ProofWorkspace) (snap : GoalSnapshot)
       id := toString node.id
       depth := node.depth
       goal
+      targetSize := node.snapshot.metrics.targetSize
+      targetDepth := node.snapshot.metrics.targetDepth
+      binders := node.snapshot.metrics.binders
+      logicalNodes := node.snapshot.metrics.logicalNodes
+      metavars := node.snapshot.metrics.metavars
+      localFacts := node.snapshot.metrics.localFacts
+      localData := node.snapshot.metrics.localData
+      localSize := node.snapshot.metrics.localSize
+      difficulty := node.snapshot.metrics.difficulty
       subgoals := node.signals.subgoals
       exactLocal := node.signals.exactLocal
       contradiction := node.signals.contradiction
@@ -86,6 +96,7 @@ def buildRequest (workspaceRef : IO.Ref ProofWorkspace) (snap : GoalSnapshot)
     family := transition.candidate.family.name
     operation := transition.candidate.operation.name
     cost := transition.candidate.estimatedCost
+    progress := (atlas.transitionPotential? transition).getD 0.5
     executable := transition.executable
   }
   let feedbackStart :=
@@ -96,6 +107,7 @@ def buildRequest (workspaceRef : IO.Ref ProofWorkspace) (snap : GoalSnapshot)
     transition? := observation.transition?.map toString
     outcome := outcomeName observation.outcome
     failureClass? := observation.failureClass?.map failureName
+    detail? := observation.debug?.map (bounded 512)
   }
   let orderedObjects := workspace.objects.insertionSort fun left right =>
     if left.utility == right.utility then left.id.toNat < right.id.toNat
@@ -105,7 +117,7 @@ def buildRequest (workspaceRef : IO.Ref ProofWorkspace) (snap : GoalSnapshot)
       id := toString object.id
       kind := conjectureKindName object.kind
       status := statusName object.status
-      expression := s!"opaque:{object.id}"
+      expression := object.display?.map (bounded 1024) |>.getD s!"opaque:{object.id}"
       type? := none
       blockers := object.blockers.map toString
       utility := object.utility
@@ -115,16 +127,24 @@ def buildRequest (workspaceRef : IO.Ref ProofWorkspace) (snap : GoalSnapshot)
     remainingMs := remainingMs
     remainingAtlasWork := cfg.atlasMaxWorkUnits - usedWork
   }
+  let rootLocals ← snap.goalId.withContext do
+    let mut locals := #[]
+    for info in snap.locals do
+      locals := locals.push <| bounded perNode s!"{info.userName} : {(← ppExpr info.type).pretty}"
+    return locals
   let rootView : ModelProtocol.PlannerRootView := {
     id := rootId
     shape := shapeName snap.shape
     goal := bounded perNode (← ppExpr snap.target).pretty
+    locals := rootLocals
   }
   return {
     requestId := s!"{snap.fingerprint}/{workspace.version}"
     workspaceVersion := workspace.version
     budget := budgetView
     root := rootView
+    structuredThoughts := true
+    leanCandidates := cfg.modelLeanCode && cfg.experimentalRawLeanCode
     regions
     nodes
     transitions
@@ -239,21 +259,26 @@ def query? (workspace : IO.Ref ProofWorkspace) (snap : GoalSnapshot)
   | .error error => return .error error
   | .ok response =>
       let beforeCompile ← workspace.get
-      let (proposals, batch) ← ConjectureEngine.compile snap cfg response.thoughts beforeCompile.objects
+      let compiled ← ConjectureEngine.compile snap cfg response.thoughts beforeCompile.objects
       let current ← workspace.get
-      let batch := { batch with epoch := current.neuralEpoch + 1 }
-      discard <| Workspace.absorbThoughtBatch workspace batch
+      let batch := { compiled.batch with epoch := current.neuralEpoch + 1 }
+      let thoughtDelta ← Workspace.absorbThoughtBatch workspace batch
+      for rejection in compiled.rejections do
+        Workspace.recordObservation workspace .rejected (some rejection.failureClass)
+          (debug? := some rejection.detail)
       let expansionResults ← executeExpansionRequests
         workspace snap cfg budget response.expansionRequests
       let current ← workspace.get
       return .ok {
         guidance := toGuidance current.atlas response cfg.plannerAllowExpansion
-        novelActions := proposals.map Proposal.compile
-        leanCandidates := response.leanCandidates
+        novelActions := compiled.proposals.map Proposal.compile
+        leanCandidates := if request.leanCandidates then response.leanCandidates else #[]
         expansionRequests := response.expansionRequests
         strategy := response.strategy
         confidence := response.confidence
         expansionResults
+        thoughtUpdates := thoughtDelta.toVersion - thoughtDelta.fromVersion +
+          compiled.rejections.size
       }
 
 end PlannerEngine

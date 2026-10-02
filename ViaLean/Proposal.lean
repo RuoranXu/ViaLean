@@ -9,7 +9,7 @@ inductive StructuralRule
 deriving BEq, Hashable, Repr, Inhabited
 
 inductive ProposalKind
-  | direct | cut | equalityMid | iffMid | witness | structural | rewrite | external
+  | direct | cut | caseSplit | equalityMid | iffMid | witness | structural | rewrite | external
 deriving BEq, Hashable, Repr, Inhabited
 
 inductive ProposalOrigin
@@ -25,6 +25,8 @@ deriving BEq, Hashable, Repr, Inhabited
 inductive ProposalPayload
   | directTerm (term : Expr)
   | cutType (type : Expr)
+  | verifiedCut (type proof : Expr)
+  | caseSplit (proposition : Expr)
   | libraryApply (theoremName : Name)
   | equalityMid (mid : Expr)
   | iffMid (mid : Expr)

@@ -24,7 +24,8 @@ def observingMeta? (action : MetaM (Option α)) : MetaM (Option α) := do
     let result ← withoutSpeculativeMessages action
     if result.isNone then setMCtx saved
     return result
-  catch _ =>
+  catch error =>
+    if error.isInterrupt then throw error
     setMCtx saved
     return none
 

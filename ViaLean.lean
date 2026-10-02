@@ -25,8 +25,11 @@ import ViaLean.Scheduler.PersistentStats
 import ViaLean.Solver.Router
 import ViaLean.Proposers.Local
 import ViaLean.NativeSolver
+import ViaLean.Transport
+import ViaLean.Proposers.Transport
 import ViaLean.Frontier
 import ViaLean.Model.Protocol
+import ViaLean.Model.Syntax
 import ViaLean.Model.Process
 import ViaLean.Model.Provider
 import ViaLean.Model.Guidance

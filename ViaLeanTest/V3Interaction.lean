@@ -57,9 +57,17 @@ elab "v3_planner_workspace_exchange_guard" : tactic => do
     let response := (Json.mkObj [
       ("root_value", toJson (0.72 : Float)),
       ("confidence", toJson (0.61 : Float)),
-      ("thoughts", Json.arr #[Json.mkObj [
-        ("id", "helper-h"), ("kind", "exact"),
-        ("expression_ref", "h"), ("dependencies", Json.arr #[])]]),
+      ("thoughts", Json.arr #[
+        Json.mkObj [
+          ("id", "helper-h"), ("kind", "exact"),
+          ("expression_ref", "h"), ("dependencies", Json.arr #[])],
+        Json.mkObj [
+          ("id", "invented-helper"), ("kind", "helper_lemma"),
+          ("expression", "P ∨ P"), ("dependencies", Json.arr #[])],
+        Json.mkObj [
+          ("id", "unsafe"), ("kind", "helper_lemma"),
+          ("expression", "by run_tac IO.println \"unsafe\""),
+          ("dependencies", Json.arr #[])]]),
       ("strategy", Json.mkObj [
         ("primary_family", region.family.name),
         ("secondary_families", Json.arr #[Json.str "construction"]),
@@ -74,8 +82,8 @@ elab "v3_planner_workspace_exchange_guard" : tactic => do
     match ← PlannerEngine.query? workspace snap cfg budget with
     | .error error => throwError "valid planner exchange failed: {error}"
     | .ok decision =>
-        unless decision.novelActions.size == 1 do
-          throwError "thought batch was not compiled independently"
+        unless decision.novelActions.size == 2 && decision.thoughtUpdates == 3 do
+          throwError "valid and invalid thought siblings were not processed independently"
         unless decision.expansionResults.size == 1 do
           throwError "planner expansion request did not reach Atlas"
         unless decision.expansionRequests[0]!.reasonCode? == some "connect helper to constructor obligations" do
@@ -95,8 +103,16 @@ elab "v3_planner_workspace_exchange_guard" : tactic => do
     }
     unless !deltaView.objects.isEmpty && !deltaView.observations.isEmpty do
       throwError "next neural epoch did not receive the Workspace delta"
-    unless deltaView.objects.all (fun object => object.expression.startsWith "opaque:") do
-      throwError "planner object view leaked a raw Lean expression"
+    unless deltaView.structuredThoughts && !deltaView.leanCandidates &&
+        deltaView.root.locals.any (·.contains "h : P") do
+      throwError "planner request omitted structured-thought capabilities or root locals"
+    unless deltaView.objects.any (fun object => object.expression.contains "P ∨ P") &&
+        deltaView.objects.all (fun object => !object.expression.startsWith "opaque:") do
+      throwError "accepted neural objects did not retain bounded semantic displays"
+    unless deltaView.observations.any (fun observation =>
+        observation.failureClass? == some "unsafe_syntax" &&
+        observation.detail?.any (·.contains "thought:unsafe")) do
+      throwError "rejected thought feedback did not reach the next neural epoch"
     let badBudget ← Budget.start 2
     let badCfg := { cfg with modelReplayResponse := "{malformed" }
     match ← PlannerEngine.query? workspace snap badCfg badBudget with

@@ -2,8 +2,10 @@ import ViaLean.Config
 import ViaLean.Goal
 import ViaLean.Workspace
 import ViaLean.Search.Execute
+import ViaLean.Induction
 import Lean.Meta.Tactic.Apply
 import Lean.Meta.Tactic.Cases
+import Lean.Meta.Tactic.Induction
 import Lean.Meta.Tactic.Contradiction
 import Lean.Meta.Tactic.Intro
 import Lean.Meta.Tactic.Rewrite
@@ -32,6 +34,7 @@ structure FrontierProbe where
   executable  : Bool := false
   subject?    : Option FVarId := none
   constructor? : Option Name := none
+  recursor?   : Option Name := none
   symm        : Bool := false
   goals       : Array String := #[]
   facts       : Array String := #[]
@@ -359,26 +362,24 @@ deriving Inhabited
 private def previewFamily (label : String) : StrategyFamily :=
   if label.startsWith "rewrite:" then .equality
   else if label.startsWith "cases:" then .elimination
+  else if label.startsWith "induction:" then .elimination
   else if label.startsWith "constructor:" then .construction
   else if label.startsWith "apply:" then .backward
   else if label == "simp" then .normalization
   else if label == "intro" then .structural
   else .mixed
 
-private def previewOperation (label : String) : SymbolicOperation :=
-  if label == "intro" then .intro
-  else if label == "simp" then .simplifyTarget
-  else .sketch #[]
 
 private def futureSuccessors
     (goal : MVarId) (cfg : ProposeConfig) (budget? : Option Budget)
-    (work : IO.Ref Nat) (workLimit : Nat) : MetaM (Array FutureSuccessor) :=
+    (work : IO.Ref Nat) (workLimit : Nat) (allowInduction : Bool := true) :
+    MetaM (Array FutureSuccessor) :=
   goal.withContext do
     let target ← instantiateMVars (← goal.getType)
     let mut locals : Array LocalDecl := #[]
     for decl in ← getLCtx do
       unless decl.isImplementationDetail do locals := locals.push decl
-    let tryBranch (label : String) (action : MetaM (Array MVarId)) :
+    let tryBranch (label : String) (operation : SymbolicOperation) (action : MetaM (Array MVarId)) :
         MetaM (Option FutureSuccessor) := do
       unless (← budgetOpen budget?) && (← consumeWork? work workLimit) do return none
       let saved ← saveState
@@ -389,10 +390,21 @@ private def futureSuccessors
           saved.restore
           return none
         let family := previewFamily label
+        let parentDifficulty := (← snapshot goal).metrics.difficulty
+        let mut childTotal := 0.0
+        let mut liveChildren := 0
+        for child in children do
+          unless ← child.isAssigned do
+            childTotal := childTotal + (← snapshot child).metrics.difficulty
+            liveChildren := liveChildren + 1
+        let estimatedCost := if liveChildren = 0 then 0.1 else
+          let mean := childTotal / Float.ofNat liveChildren
+          let branchPenalty := Float.ofNat (liveChildren - 1) * 0.20
+          max 0.1 ((mean + branchPenalty) / max 0.1 parentDifficulty)
         return some {
           label
           candidate := {
-            operation := previewOperation label, family, estimatedCost := Float.ofNat (max 1 children.size)
+            operation, family, estimatedCost
             origin := .derived, fingerprint := hash ((← mkGoalKey goal).bucket, label) }
           children }
       catch _ =>
@@ -401,7 +413,7 @@ private def futureSuccessors
     let mut groups := #[]
 
     if target.isForall then
-      if let some branch ← tryBranch "intro" do
+      if let some branch ← tryBranch "intro" .intro do
         let clone ← freshGoal target
         let (_, child) ← clone.intro1P
         return #[child]
@@ -413,7 +425,7 @@ private def futureSuccessors
       if decl.type.isEq then
         for symm in #[false, true] do
           let direction := if symm then "reverse" else "forward"
-          if let some branch ← tryBranch s!"rewrite:{decl.userName}:{direction}" do
+          if let some branch ← tryBranch s!"rewrite:{decl.userName}:{direction}" (.rewriteLocal decl.fvarId symm) do
             let clone ← freshGoal target
             let rewriteResult ← clone.rewrite target (mkFVar decl.fvarId) (symm := symm)
             let child ← clone.replaceTargetEq rewriteResult.eNew rewriteResult.eqProof
@@ -426,7 +438,7 @@ private def futureSuccessors
     for decl in locals do
       if (← isProp decl.type) && !decl.type.isEq && !decl.type.isHEq &&
           (← safeEliminationType decl.type) then
-        if let some branch ← tryBranch s!"cases:{decl.userName}" do
+        if let some branch ← tryBranch s!"cases:{decl.userName}" (.casesLocal decl.fvarId) do
           let clone ← freshGoal target
           let cases ← clone.cases decl.fvarId
           if cases.isEmpty then throwError "cases produced no branches"
@@ -435,8 +447,23 @@ private def futureSuccessors
           groups := groups.push branch
           break
 
+    for decl in locals do
+      if !allowInduction then break
+      let type ← instantiateMVars decl.type
+      if !(← isProp type) && (← targetBenefitsFromInduction target decl.fvarId) then
+        let some recursor ← inductionRecursor? type | continue
+        if let some branch ← tryBranch s!"induction:{decl.userName}"
+            (.inductionLocal decl.fvarId recursor) do
+          let clone ← freshGoal target
+          let branches ← clone.induction decl.fvarId recursor
+          if branches.isEmpty then throwError "induction produced no branches"
+          return branches.map (·.mvarId)
+        then
+          groups := groups.push branch
+          break
+
     for ctor in ← constructorsFor target do
-      if let some branch ← tryBranch s!"constructor:{ctor}" do
+      if let some branch ← tryBranch s!"constructor:{ctor}" (.constructor ctor) do
         let clone ← freshGoal target
         return (← clone.apply (← mkConstWithFreshMVarLevels ctor)).toArray
       then
@@ -444,7 +471,7 @@ private def futureSuccessors
         break
 
     for decl in locals do
-      if let some branch ← tryBranch s!"apply:{decl.userName}" do
+      if let some branch ← tryBranch s!"apply:{decl.userName}" (.applyLocal decl.fvarId) do
         let clone ← freshGoal target
         return (← clone.apply (mkFVar decl.fvarId)).toArray
       then
@@ -482,6 +509,7 @@ private def exploreFutureBreadthFirst
         views := views.push view
         if item.depth < cfg.frontierFutureDepth then
           let groups ← futureSuccessors item.goal cfg budget? work workLimit
+            (allowInduction := item.depth == 0)
           for successor in groups.take cfg.frontierFutureWidth do
             if successor.children.isEmpty then
               if views.size < cfg.frontierFutureNodes then
@@ -560,6 +588,11 @@ def expandWorkspace (workspace : IO.Ref ProofWorkspace) (snap : GoalSnapshot)
         if item.depth >= request.maxDepth || (← work.get) >= workLimit then continue
         unless ← item.goal.isAssigned do
           let successors ← futureSuccessors item.goal cfg budget? work workLimit
+            (allowInduction := item.depth == 0)
+          let successors := successors.insertionSort fun left right =>
+            if left.candidate.estimatedCost == right.candidate.estimatedCost then
+              left.candidate.fingerprint < right.candidate.fingerprint
+            else left.candidate.estimatedCost < right.candidate.estimatedCost
           let successors := match request.family? with
             | none => successors
             | some preferred => successors.insertionSort fun left right =>
@@ -625,7 +658,7 @@ private def deepFutureProbe?
     "multi-operator" "expanded") with executable := false, future }
 
 private def normalizationProbes
-    (snap : GoalSnapshot) (cfg : ProposeConfig) (chars : Nat)
+    (snap : GoalSnapshot) (_cfg : ProposeConfig) (chars : Nat)
     (budget? : Option Budget) (work : IO.Ref Nat) (workLimit : Nat) : MetaM (Array FrontierProbe) := do
   unless ← budgetOpen budget? do return #[]
   let mut probes := #[]
@@ -639,43 +672,10 @@ private def normalizationProbes
     probes := probes.push <| makeProbe "normalization" "whnf" "target" "changed"
       #[← renderExpr reduced chars]
 
-  unless ← safeForEagerTransforms reduced do return probes
-
-  if let some probe ← observingProbe? budget? work workLimit do
-    let goal ← freshGoal snap.target
-    let simpCtx ← Simp.Context.mkDefault
-    let (result, _) ← withFrontierLimits <|
-      simpTargetStar goal simpCtx
-    match result with
-    | .closed => return some { (makeProbe "normalization" "simp-target-star" "local propositions" "closed") with executable := true }
-    | .modified child =>
-        return some <| makeProbe "normalization" "simp-target-star" "local propositions" "changed"
-          #[← renderGoal child chars]
-    | .noChange => return none
-  then probes := probes.push probe
-
-  if let some probe ← observingProbe? budget? work workLimit do
-    let goal ← freshGoal snap.target
-    let simpCtx ← Simp.Context.mkDefault
-    let propHyps ← getPropHyps
-    let (result?, _) ← withFrontierLimits <|
-      simpGoal goal simpCtx (fvarIdsToSimp := propHyps)
-    match result? with
-    | none => return some { (makeProbe "normalization" "simp-context" "all proposition hypotheses" "closed") with executable := true }
-    | some (_, child) =>
-        let target ← renderGoal child chars
-        let facts ← child.withContext do
-          let mut facts := #[]
-          for decl in ← getLCtx do
-            unless decl.isImplementationDetail do
-              if ← isProp decl.type then
-                if facts.size < cfg.frontierMaxFacts then
-                  facts := facts.push s!"{decl.userName} : {← renderExpr decl.type chars}"
-          return facts
-        if target == (← renderExpr snap.target chars) then return none
-        return some <| makeProbe "normalization" "simp-context" "all proposition hypotheses" "changed"
-          #[target] facts
-  then probes := probes.push probe
+  -- Executing the global simp set during a speculative preview is both
+  -- version-sensitive and capable of surfacing recursion-limit diagnostics.
+  -- Normalization remains available as a bounded leaf; the frontier keeps
+  -- stable structural, rewrite, contradiction, and WHNF views.
   return probes
 
 private def contradictionProbes
@@ -725,6 +725,21 @@ private def eliminationProbes
         let goals ← renderGoals (branches.map (·.mvarId)) cfg.frontierMaxChildren chars
         return some { (makeProbe "elimination" "cases-one-layer" (toString info.userName)
           "branched" goals) with subject? := some info.fvarId }
+      then probes := probes.push probe
+  for info in snap.locals do
+    unless ← budgetOpen budget? do break
+    if probes.size ≥ cfg.frontierMaxPerPerspective then break
+    let type ← instantiateMVars info.type
+    if !(← isProp type) && (← targetBenefitsFromInduction snap.target info.fvarId) then
+      let some recursor ← inductionRecursor? type | continue
+      if let some probe ← observingProbe? budget? work workLimit do
+        let goal ← freshGoal snap.target
+        let branches ← goal.induction info.fvarId recursor
+        if branches.isEmpty || branches.size > cfg.frontierMaxChildren then return none
+        let goals ← renderGoals (branches.map (·.mvarId)) cfg.frontierMaxChildren chars
+        return some { (makeProbe "elimination" "induction-one-layer"
+          (toString info.userName) "branched" goals) with
+          subject? := some info.fvarId, recursor? := some recursor }
       then probes := probes.push probe
   return probes
 

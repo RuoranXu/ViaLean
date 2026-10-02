@@ -22,6 +22,7 @@ private def familyName : ProposalFamily → String
 private def kindName : ProposalKind → String
   | .direct => "direct"
   | .cut => "cut"
+  | .caseSplit => "case_split"
   | .equalityMid => "equality_mid"
   | .iffMid => "iff_mid"
   | .witness => "witness"
@@ -55,6 +56,8 @@ private def actionKindAndSummary (action : ProofAction) : MetaM (String × Strin
       let summary ← match proposal.payload with
         | .directTerm term => pp term
         | .cutType type => pp type
+        | .verifiedCut type _ => pp type
+        | .caseSplit proposition => pp proposition
         | .libraryApply theoremName => pure (toString theoremName)
         | .equalityMid mid => pp mid
         | .iffMid mid => pp mid

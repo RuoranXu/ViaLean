@@ -19,6 +19,7 @@ inductive SymbolicOperation
   | intro
   | constructor (name : Name)
   | casesLocal (fvar : FVarId)
+  | inductionLocal (fvar : FVarId) (recursor : Name)
   | rewriteLocal (fvar : FVarId) (symm : Bool)
   | simplifyTarget
   | contradiction
@@ -26,6 +27,7 @@ inductive SymbolicOperation
   | iffBridge (mid : Expr)
   | witness (value : Expr)
   | cut (type : Expr)
+  | caseSplit (proposition : Expr)
   | structural (rule : StructuralRule)
   | leaf (solver : SolverKind)
   | sketch (holes : Array Expr)
@@ -89,6 +91,7 @@ def SymbolicOperation.name : SymbolicOperation → String
   | .intro => "intro"
   | .constructor name => s!"constructor:{name}"
   | .casesLocal _ => "cases_local"
+  | .inductionLocal _ recursor => s!"induction_local:{recursor}"
   | .rewriteLocal _ false => "rewrite_local"
   | .rewriteLocal _ true => "rewrite_local_reverse"
   | .simplifyTarget => "simplify_target"
@@ -97,6 +100,7 @@ def SymbolicOperation.name : SymbolicOperation → String
   | .iffBridge _ => "iff_bridge"
   | .witness _ => "witness"
   | .cut _ => "cut"
+  | .caseSplit _ => "case_split"
   | .structural rule => s!"structural:{(repr rule).pretty}"
   | .leaf solver => s!"leaf:{(repr solver).pretty}"
   | .sketch holes => s!"sketch:{holes.size}"
@@ -125,6 +129,8 @@ def ProofAction.toSymbolic : ProofAction → SymbolicTransitionCandidate
       operation := match proposal.payload with
         | .directTerm term => .exactTerm term
         | .cutType type => .cut type
+        | .verifiedCut type _ => .cut type
+        | .caseSplit proposition => .caseSplit proposition
         | .libraryApply name => .applyConst name
         | .equalityMid mid => .equalityBridge mid
         | .iffMid mid => .iffBridge mid

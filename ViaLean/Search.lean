@@ -3,6 +3,7 @@ import ViaLean.Compose
 import ViaLean.Proposers.Structural
 import ViaLean.Proposers.Equality
 import ViaLean.Proposers.Cut
+import ViaLean.Proposers.Transport
 import ViaLean.Proposers.Witness
 import ViaLean.Proposers.Library
 import ViaLean.Proposers.Iff
@@ -85,12 +86,14 @@ private def emitTraining (state : SearchState) (kind : String)
     pushTrainingEvent state.traceEvents kind workspace.version payload
 
 private def directProof?
-    (goal : MVarId) (state : SearchState) (requestedSec : Nat) : MetaM (Option Expr) := do
+    (goal : MVarId) (state : SearchState) (requestedSec : Nat)
+    (extraPremises : Array Name := #[]) : MetaM (Option Expr) := do
   let seconds ← availableSec state requestedSec
   if seconds = 0 then return none
   let attempt ← state.router.solve {
     goal
     budgetMs := seconds * 1000
+    extraPremises
     wantDiagnostics := state.config.trace
   }
   if state.config.trace then
@@ -110,33 +113,47 @@ private def cheapClose? (snap : GoalSnapshot) : MetaM (Option Expr) := do
   return none
 
 
+private structure ActionCollection where
+  actions : Array ProofAction := #[]
+  libraryPremises : Array Name := #[]
+
 private def collectActions
-    (snap : GoalSnapshot) (state : SearchState) : MetaM (Array ProofAction) := do
+    (snap : GoalSnapshot) (state : SearchState) : MetaM ActionCollection := do
   let cfg := state.config
   let mut actions := #[]
-  if (← state.budget.remainingMs) = 0 then return actions
+  let mut libraryPremises := #[]
+  if (← state.budget.remainingMs) = 0 then return { actions, libraryPremises }
   if cfg.structural then
     actions := actions ++ (structuralProposals snap cfg).map Proposal.compile
-  if (← state.budget.remainingMs) = 0 then return actions
+  if (← state.budget.remainingMs) = 0 then return { actions, libraryPremises }
   if cfg.equalityBridge && snap.shape == .equality then
     actions := actions ++ (← equalityProposals snap cfg).map Proposal.compile
-  if (← state.budget.remainingMs) = 0 then return actions
+  if (← state.budget.remainingMs) = 0 then return { actions, libraryPremises }
   if cfg.iffBridge && snap.shape == .iff then
     actions := actions ++ (← iffProposals snap cfg).map Proposal.compile
-  if (← state.budget.remainingMs) = 0 then return actions
+  if (← state.budget.remainingMs) = 0 then return { actions, libraryPremises }
   if cfg.witnesses && snap.shape == .exists then
     actions := actions ++ (← witnessProposals snap cfg).map Proposal.compile
-  if (← state.budget.remainingMs) = 0 then return actions
+  if (← state.budget.remainingMs) = 0 then return { actions, libraryPremises }
   if cfg.cuts then
     actions := actions ++ (← localCutProposals snap cfg).map Proposal.compile
-  if (← state.budget.remainingMs) = 0 then return actions
+  if (← state.budget.remainingMs) = 0 then return { actions, libraryPremises }
+  if cfg.nativeEquivTransport then
+    actions := actions ++ (← equivTransportProposals snap cfg).map Proposal.compile
+  if (← state.budget.remainingMs) = 0 then return { actions, libraryPremises }
+  actions := actions ++ (← state.router.symbolicProposals snap).map Proposal.compile
+  if (← state.budget.remainingMs) = 0 then return { actions, libraryPremises }
   if cfg.library then
     let premiseLimit := if cfg.maxRetrievedPremises = 0 then cfg.maxCandidates
       else cfg.maxRetrievedPremises
     let premises ← libraryPremiseProvider.retrieve snap premiseLimit
+    libraryPremises := premises.map (·.name)
     if (← state.budget.remainingMs) > 0 then
       actions := actions ++ (← libraryCutProposals snap cfg premises).map Proposal.compile
-  return actions.extract 0 (min actions.size cfg.maxActionsPerNode)
+  return {
+    actions := actions.extract 0 (min actions.size cfg.maxActionsPerNode)
+    libraryPremises
+  }
 
 
 private def feedbackWindow (state : SearchState) : MetaM (Array SearchFeedback) := do
@@ -196,13 +213,14 @@ private def guidanceFor?
       | .ok decision =>
           if state.config.trace then
             trace[ViaLean.model]
-              "planner depth={depth}, value={decision.guidance.value}, confidence={decision.confidence}, scored={decision.guidance.actionScores.size}, novel={decision.novelActions.size}, code={decision.leanCandidates.size}, expansions={decision.expansionRequests.size}"
+              "planner depth={depth}, value={decision.guidance.value}, confidence={decision.confidence}, scored={decision.guidance.actionScores.size}, novel={decision.novelActions.size}, thought_updates={decision.thoughtUpdates}, code={decision.leanCandidates.size}, expansions={decision.expansionRequests.size}"
           emitTraining state "planner" <| Json.mkObj [
             ("root", toString snap.key.bucket),
             ("value", toJson decision.guidance.value),
             ("confidence", toJson decision.confidence),
             ("scored", decision.guidance.actionScores.size),
             ("novel_actions", decision.novelActions.size),
+            ("thought_updates", decision.thoughtUpdates),
             ("expansions", decision.expansionRequests.size)]
           let novelActions := decision.novelActions.foldl (init := step.novelActions)
             fun accumulated action =>
@@ -214,10 +232,16 @@ private def guidanceFor?
           step := { guidance? := some decision.guidance, novelActions, leanCandidates }
           let after ← state.workspace.get
           let previous ← state.plannerCursor.get
-          state.plannerCursor.set <|
+          continueAfterExpansion := decision.thoughtUpdates > 0 ||
+            decision.expansionResults.any (fun expansion =>
+              expansion.addedNodes > 0 || expansion.addedTransitions > 0)
+          let advanced :=
             ReplanEngine.advance after snap.key decision.confidence decision.strategy previous
-          continueAfterExpansion := decision.expansionResults.any fun expansion =>
-            expansion.addedNodes > 0 || expansion.addedTransitions > 0
+          state.plannerCursor.set <| if continueAfterExpansion then
+            { advanced with
+              lastVersion := epochCursor.lastVersion
+              observationCount := epochCursor.observationCount }
+          else advanced
       | .error error =>
           if state.config.trace then trace[ViaLean.model] "planner fallback: {error}"
           let after ← state.workspace.get
@@ -256,21 +280,6 @@ mutual
         path := { state.path with
           goalKeys := state.path.goalKeys.insert snap.key } }
 
-      if state.config.frontier && state.config.atlasGraph && nodeId?.isSome then
-        let burst ← FrontierEngine.expandWorkspace state.workspace snap state.config {
-          maxDepth := min state.config.frontierFutureDepth state.config.atlasExpansionMaxDepth
-          maxWidthPerNode := min state.config.frontierFutureWidth
-            state.config.atlasExpansionMaxWidth
-          workUnits := state.config.atlasGuaranteedWork
-          reason := "guaranteed-symbolic"
-        } (some state.budget)
-        emitTraining state "atlas_build" <| Json.mkObj [
-          ("root", toString snap.key.bucket), ("depth", depth),
-          ("added_nodes", burst.addedNodes),
-          ("added_transitions", burst.addedTransitions),
-          ("meta_ops", burst.metaOps),
-          ("completed", burst.completed)]
-
       let synthesis ← LocalSynthesizer.synthesizeDetailed
         snap state.config state.config.maxActionsPerNode
       let synthesized := synthesis.candidates
@@ -301,12 +310,61 @@ mutual
         if depth = 0 then noteWinner state .direct
         return some (← finalizeProof snap.target proof)
 
-      -- A short direct probe is always a first-class action.
-      if let some proof ← observingMeta? <|
-          tryProofAction? snap nativeCloseAction state depth then
-        return some proof
+      -- Normalize deterministic logical shells before spending compute on
+      -- futures or neural guidance. The resulting atomic state retains every
+      -- introduced local and is the more informative state for both systems.
+      -- With a model enabled, retain the shell as an observable symbolic future
+      -- so the interaction remains causal rather than nominal.
+      if state.config.structural && !state.modelEnabled then
+        if let some proposal := (structuralProposals snap state.config)[0]? then
+          return ← tryProofAction? snap proposal.compile state depth
 
-      let baseActions ← collectActions snap state
+      -- A configured direct window larger than the final reserve denotes a
+      -- substantial semantic-closure phase.  Run that phase before speculative
+      -- proposal materialization, but cap it from the reserve so symbolic and
+      -- model-guided continuation retain compute.  Ordinary brief probes keep
+      -- the stable frontier-first order below.
+      let substantialDirect :=
+        state.config.directProbeSec > state.config.finalDirectMinSec
+      if substantialDirect then
+        let remainingBeforeDirect ← state.budget.remainingSecFloor
+        let semanticCap := max 1 (2 * state.config.finalDirectMinSec + 2)
+        let directSliceSec := min state.config.directProbeSec
+          (min remainingBeforeDirect semanticCap)
+        if directSliceSec > 0 then
+          if let some proof ← observingMeta? <|
+              tryProofAction? snap nativeCloseAction state depth #[]
+                (some directSliceSec) then
+            return some proof
+
+      -- Guaranteed symbolic futures should inform hard continuations, not
+      -- consume an explicitly substantial semantic-closure window first.
+      if state.config.frontier && state.config.atlasGraph && nodeId?.isSome then
+        let burst ← FrontierEngine.expandWorkspace state.workspace snap state.config {
+          maxDepth := min state.config.frontierFutureDepth state.config.atlasExpansionMaxDepth
+          maxWidthPerNode := min state.config.frontierFutureWidth
+            state.config.atlasExpansionMaxWidth
+          workUnits := state.config.atlasGuaranteedWork
+          reason := "guaranteed-symbolic"
+        } (some state.budget)
+        emitTraining state "atlas_build" <| Json.mkObj [
+          ("root", toString snap.key.bucket), ("depth", depth),
+          ("added_nodes", burst.addedNodes),
+          ("added_transitions", burst.addedTransitions),
+          ("meta_ops", burst.metaOps),
+          ("completed", burst.completed)]
+
+      let collected ← collectActions snap state
+      if !substantialDirect then
+        let remainingBeforeDirect ← state.budget.remainingSecFloor
+        let directSliceSec := min state.config.directProbeSec
+          (max 1 (remainingBeforeDirect / 4))
+        if directSliceSec > 0 then
+          if let some proof ← observingMeta? <|
+              tryProofAction? snap nativeCloseAction state depth
+                collected.libraryPremises (some directSliceSec) then
+            return some proof
+      let baseActions := collected.actions
       if state.modelEnabled && modelMode state == "interactive" then
         if let some proof ← observingMeta? <| tryInteractive? snap baseActions state depth then
           return some proof
@@ -320,7 +378,7 @@ mutual
         for code in neural.leanCandidates.take state.config.modelMaxCodeCandidates do
           if let some proof := (← tryModelLeanCandidate? snap code state depth).proof? then
             return some proof
-      let actions ← orderActions state neural.guidance? actions
+      let actions ← orderActions state nodeId? neural.guidance? actions
       for action in actions do
         unless action.family == .structural do
           unless ← hasSpeculativeBudget state do continue
@@ -331,7 +389,15 @@ mutual
       let remaining ← state.budget.remainingSecFloor
       if remaining = 0 then return none
       noteAttempt state nativeCloseAction
-      let proof? ← directProof? goal state remaining
+      let extraPremises := actions.foldl (init := collected.libraryPremises) fun names action =>
+        match action.payload with
+        | .proposal proposal =>
+            match proposal.payload with
+            | .libraryApply name =>
+                if names.contains name then names else names.push name
+            | _ => names
+        | _ => names
+      let proof? ← directProof? goal state remaining extraPremises
       state.scheduler.record .direct (if proof?.isSome then 1.0 else 0.0)
       if depth = 0 && proof?.isSome then noteWinner state .direct
       return proof?
@@ -397,6 +463,23 @@ mutual
       let some left ← solveTarget? (mkIff args[0]! mid) childState (depth + 1) | return none
       let some right ← solveTarget? (mkIff mid args[1]!) childState (depth + 1) | return none
       return some (← composeAction snap.target .iffTrans #[left, right])
+    | .caseSplit proposition =>
+      unless ← isProp proposition do return none
+      if proposition.hasLooseBVars then return none
+      let root ← freshGoal snap.target
+      let (positive, negative) ← root.byCases proposition `hCaseSplit
+      let children := #[positive.mvarId, negative.mvarId]
+      if children.size > state.config.maxStructuralChildren then return none
+      unless ← solveFrontierChildren children childState depth do return none
+      let some proof ← getExprMVarAssignment? root | return none
+      return some (← finalizeProof snap.target proof)
+    | .verifiedCut cutType suppliedProof =>
+      let cutProof ← finalizeProof cutType suppliedProof
+      withLocalDeclD `hHelper cutType fun h => do
+        let some continuation ← solveTarget? snap.target childState (depth + 1) | return none
+        let continuation ← mkLambdaFVars #[h] continuation
+        return some (← composeAction snap.target (.cutApply cutType)
+          #[cutProof, continuation])
     | .cutType cutType =>
       let some cutProof ← solveTarget? cutType childState (depth + 1) | return none
       withLocalDeclD `h cutType fun h => do
@@ -459,6 +542,11 @@ mutual
     | "cases-one-layer" =>
         let some subject := probe.subject? | return none
         let branches ← root.cases subject
+        children := branches.map (·.mvarId)
+    | "induction-one-layer" =>
+        let some subject := probe.subject? | return none
+        let some recursor := probe.recursor? | return none
+        let branches ← root.induction subject recursor
         children := branches.map (·.mvarId)
     | "constructor-one-layer" =>
         let some ctor := probe.constructor? | return none
@@ -623,14 +711,16 @@ mutual
 
   partial def tryProofAction?
       (snap : GoalSnapshot) (action : ProofAction)
-      (state : SearchState) (depth : Nat) : MetaM (Option Expr) := do
+      (state : SearchState) (depth : Nat)
+      (extraPremises : Array Name := #[])
+      (directBudgetSec? : Option Nat := none) : MetaM (Option Expr) := do
     if (← state.budget.remainingMs) = 0 then return none
     noteAttempt state action
     let started ← IO.monoMsNow
     let transition? ← Workspace.beginAction state.workspace state.config snap action
     let execState := { state with activeTransition? := transition? }
     let result ← match action.payload with
-      | .close .native => directProof? snap.goalId execState state.config.directProbeSec
+      | .close .native => directProof? snap.goalId execState (directBudgetSec?.getD state.config.directProbeSec) extraPremises
       | .close _ => pure none
       | .structural _ => tryStructural? snap execState depth
       | .proposal proposal => tryProposal? snap proposal execState depth

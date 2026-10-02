@@ -38,6 +38,64 @@ elab "library_replay_guard" : tactic => do
 example (P Q R : Prop) (pq : P → Q) (qr : Q → R) : P → R := by
   library_replay_guard
 
+elab "case_split_replay_guard" proposition:term : tactic => do
+  let goal ← getMainGoal
+  goal.withContext do
+    let proposition ← Term.elabTerm proposition none
+    unless ← isProp proposition do throwError "case split guard expects a proposition"
+    let cfg : ProposeConfig := {
+      timeoutSec := 5
+      directProbeSec := 1
+      candidateProbeSec := 1
+      structural := false
+      cuts := false
+      library := false
+      maxDepth := 3
+    }
+    let proposal : Proposal := {
+      kind := .caseSplit
+      payload := .caseSplit proposition
+      origin := .manual
+      source := "regression/case-split"
+      fingerprint := proposalFingerprint .caseSplit proposition
+    }
+    let some proof ← runManualProposal goal cfg proposal
+      | throwError "case-split branches could not be replayed"
+    goal.assign proof
+    replaceMainGoal []
+
+example (P R : Prop) (positive : P → R) (negative : ¬ P → R) : R := by
+  case_split_replay_guard P
+
+elab "verified_cut_replay_guard" : tactic => do
+  let goal ← getMainGoal
+  goal.withContext do
+    let helperType := mkConst ``True
+    let suppliedProof := mkConst ``True.intro
+    let cfg : ProposeConfig := {
+      timeoutSec := 5
+      directProbeSec := 1
+      candidateProbeSec := 1
+      structural := false
+      cuts := false
+      library := false
+      maxDepth := 3
+    }
+    let proposal : Proposal := {
+      kind := .cut
+      payload := .verifiedCut helperType suppliedProof
+      origin := .manual
+      source := "regression/verified-cut"
+      fingerprint := proposalFingerprint .cut helperType
+    }
+    let some proof ← runManualProposal goal cfg proposal
+      | throwError "verified helper fact could not be composed"
+    goal.assign proof
+    replaceMainGoal []
+
+example : True := by
+  verified_cut_replay_guard
+
 elab "solve_stats_guard" : tactic => do
   let goal ← getMainGoal
   let cfg : ProposeConfig := {

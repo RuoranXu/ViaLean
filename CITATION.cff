@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use ViaLean in academic work, please cite this software."
+title: "ViaLean: Persistent Neural-Symbolic Proof Search for Lean 4"
+type: software
+authors:
+  - family-names: "Xu"
+    given-names: "Ruoran"
+repository-code: "https://github.com/RuoranXu/ViaLean"
+url: "https://github.com/RuoranXu/ViaLean"
+license: MIT
+version: 0.6.0
+date-released: 2026-10-03

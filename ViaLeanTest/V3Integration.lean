@@ -134,16 +134,18 @@ elab "v3_thought_dependency_guard" : tactic => do
       { id := "dependent", kind := "exact", expressionRef := "h",
         dependencies := #["seed"] }
     ]
-    let (proposals, batch) ← ConjectureEngine.compile snap {} valid
-    unless proposals.size == 2 && batch.thoughts.size == 2 do
+    let compiled ← ConjectureEngine.compile snap {} valid
+    unless compiled.proposals.size == 1 && compiled.batch.thoughts.size == 2 &&
+        compiled.rejections.isEmpty do
       throwError "ordered thought dependencies were not preserved"
     let invalid : Array ModelProtocol.PlannerThoughtView := #[
       { id := "blocked", kind := "exact", expressionRef := "h",
         dependencies := #["missing"] }
     ]
-    let (blocked, _) ← ConjectureEngine.compile snap {} invalid
-    unless blocked.isEmpty do
-      throwError "thought with an unresolved dependency was executed"
+    let blocked ← ConjectureEngine.compile snap {} invalid
+    unless blocked.proposals.isEmpty && blocked.rejections.size == 1 &&
+        blocked.rejections[0]!.failureClass == .premiseMismatch do
+      throwError "thought with an unresolved dependency was not rejected independently"
 
 example (P : Prop) (h : P) : P := by
   v3_thought_dependency_guard

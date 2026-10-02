@@ -116,6 +116,38 @@ def ProofAtlas.node? (atlas : ProofAtlas) (id : AtlasNodeId) : Option AtlasNode 
 def ProofAtlas.transition? (atlas : ProofAtlas) (id : TransitionId) : Option AtlasTransition :=
   atlas.transitions.find? (·.id == id)
 
+private def clampUnit (value : Float) : Float := max 0.0 (min 1.0 value)
+
+/-- Structural value of a verified symbolic lookahead edge. A value above 0.5
+means that the average child is simpler than its parent after accounting for
+branching. Closed edges have value one. Unknown/unexpanded edges have no value. -/
+def ProofAtlas.transitionPotential? (atlas : ProofAtlas)
+    (transition : AtlasTransition) : Option Float :=
+  if transition.evidence.outcome == .solved then some 1.0
+  else if transition.children.isEmpty then none
+  else
+    let parentCost := (atlas.node? transition.parent).map (·.estimatedCost) |>.getD 1.0
+    let childCosts := transition.children.filterMap fun child =>
+      (atlas.node? child).map (·.estimatedCost)
+    if childCosts.isEmpty then none
+    else
+      let total := childCosts.foldl (init := 0.0) fun sum cost => sum + cost
+      let mean := total / Float.ofNat childCosts.size
+      let branchPenalty := Float.ofNat (childCosts.size - 1) * 0.20
+      some <| clampUnit (parentCost / max 0.1 (parentCost + mean + branchPenalty))
+
+/-- Best preview value available for a strategy family at one node. This is the
+symbolic fallback for the same per-transition value a future model may supply. -/
+def ProofAtlas.familyPotential? (atlas : ProofAtlas) (parent : AtlasNodeId)
+    (family : StrategyFamily) : Option Float :=
+  atlas.transitions.foldl (init := none) fun best transition =>
+    if transition.parent != parent || transition.candidate.family != family then best
+    else
+      match atlas.transitionPotential? transition, best with
+      | some value, some previous => some (max value previous)
+      | some value, none => some value
+      | none, _ => best
+
 def ProofAtlas.nodeForKey? (atlas : ProofAtlas) (key : GoalKey) : Option AtlasNode :=
   atlas.nodes.find? fun node => node.key.bucket == key.bucket && node.key.strictEq key
 
@@ -132,7 +164,13 @@ def ProofAtlas.observeGoal
             rejectedByBudget := atlas.stats.rejectedByBudget + 1 } }, none, false)
       else
         let id := UInt64.ofNat atlas.nextNode
-        let node : AtlasNode := { id, key := snap.key, snapshot := snap, depth, parent? }
+        let node : AtlasNode := {
+          id := id
+          key := snap.key
+          snapshot := snap
+          depth := depth
+          parent? := parent?
+          estimatedCost := snap.metrics.difficulty }
         ({ atlas with
             root? := atlas.root?.orElse (fun _ => some id)
             nodes := atlas.nodes.push node
@@ -156,7 +194,14 @@ def ProofAtlas.observePreview
       else
         let id := UInt64.ofNat atlas.nextNode
         let node : AtlasNode := {
-          id, key := snap.key, snapshot := snap, depth, parent?, renderedGoal, preview := true }
+          id := id
+          key := snap.key
+          snapshot := snap
+          renderedGoal := renderedGoal
+          preview := true
+          depth := depth
+          parent? := parent?
+          estimatedCost := snap.metrics.difficulty }
         ({ atlas with
             root? := atlas.root?.orElse (fun _ => some id)
             nodes := atlas.nodes.push node

@@ -20,6 +20,9 @@ def ProposalKey.ofProposal (proposal : Proposal) : ProposalKey := {
 private def ProposalPayload.strictEq : ProposalPayload → ProposalPayload → Bool
   | .directTerm left, .directTerm right => left == right
   | .cutType left, .cutType right => left == right
+  | .verifiedCut leftType leftProof, .verifiedCut rightType rightProof =>
+      leftType == rightType && leftProof == rightProof
+  | .caseSplit left, .caseSplit right => left == right
   | .libraryApply left, .libraryApply right => left == right
   | .equalityMid left, .equalityMid right => left == right
   | .iffMid left, .iffMid right => left == right

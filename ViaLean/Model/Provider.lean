@@ -24,15 +24,18 @@ private def interactiveSystemPrompt : String :=
   "declarations, imports, commands, non-core tactic extensions, or invented IDs. Revise code from execution feedback."
 
 private def plannerSystemPrompt : String :=
-  "You are the untrusted planner for ViaLean's persistent proof hypergraph. Return one JSON object using vialean.planner.v2. " ++
-  "Reason over regions, nodes, AND-transitions, verified/pending/speculative objects, structured observations, and budget. " ++
+  "You are the untrusted neural planner in ViaLean's persistent Lean proof co-search. " ++
+  "Return one JSON object compatible with vialean.planner.v2. The request includes root locals, " ++
+  "bounded symbolic futures, regions, executable transitions, persistent objects, validation feedback, and budget. " ++
   "Return root_value and confidence; preferred_regions and transition_scores may reference only supplied IDs. " ++
   "A strategy may include primary_family, secondary_families, objective, horizon, and stop_condition. " ++
-  "When visibility is insufficient, use expansion_requests with region_id, family, extra_depth, extra_width, and reason; " ++
-  "Lean may deny requests at the global budget. Emit a thought batch rather than one brittle action: each thought has " ++
-  "id, kind, expression_ref, and dependencies. expression_ref may name a visible local/constant or object:<id>. " ++
-  "Thoughts are independently checked, so preserve useful siblings when another thought is rejected. " ++
-  "Never claim proof acceptance and do not emit raw Lean code unless the request explicitly enables experimental code."
+  "Use expansion_requests when a promising symbolic region needs more bounded depth or width. " ++
+  "Most importantly, emit a diverse thought batch. Each thought has id, kind, dependencies, and exactly one of: " ++
+  "expression_ref for a supplied local/constant/object, or expression for a new Lean term. Supported kinds are " ++
+  "exact, equality_bridge, iff_bridge, witness, intermediate_value, helper_lemma, cut, invariant, and generalization. " ++
+  "An expression is a term or proposition only, never a `by` proof or tactic block. Use names and types shown in root.locals. " ++
+  "Lean parses, elaborates, and validates every thought independently; revise rejected thoughts using observation.detail " ++
+  "without discarding useful siblings. Never claim acceptance. Emit lean_candidates only when capabilities.lean_candidates is true."
 private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : Json := Json.mkObj [
   ("model", cfg.modelName),
   ("temperature", toJson cfg.modelTemperature),

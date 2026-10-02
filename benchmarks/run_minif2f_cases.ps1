@@ -9,7 +9,7 @@ param(
     [int] $From = 1,
     [int] $To = [int]::MaxValue,
     [int] $BudgetSec = 15,
-    [int] $HardTimeoutSec = 75,
+    [int] $HardTimeoutSec = 900,
     [switch] $Resume
 )
 

@@ -52,6 +52,7 @@ def Proposal.family : Proposal → ProposalFamily
       | .external | .planner => .externalCut
       | .library _ => .libraryCut
       | _ => .localCut
+  | { kind := .caseSplit, .. } => .localCut
   | { kind := .structural, .. } => .structural
   | { kind := .direct, .. } => .direct
   | _ => .direct

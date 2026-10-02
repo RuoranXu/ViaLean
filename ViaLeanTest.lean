@@ -8,6 +8,7 @@ import ViaLeanTest.Soundness
 import ViaLeanTest.Iff
 import ViaLeanTest.Model
 import ViaLeanTest.NativeTransforms
+import ViaLeanTest.Induction
 import ViaLeanTest.Frontier
 import ViaLeanTest.Integration
 import ViaLeanTest.V3Core

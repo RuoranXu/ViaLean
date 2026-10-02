@@ -206,6 +206,7 @@ structure PlannerRootView where
   id : String
   shape : String
   goal : String
+  locals : Array String := #[]
 deriving Inhabited, Repr
 
 structure PlannerRegionView where
@@ -220,6 +221,15 @@ structure PlannerNodeView where
   id : String
   depth : Nat
   goal : String
+  targetSize : Nat := 0
+  targetDepth : Nat := 0
+  binders : Nat := 0
+  logicalNodes : Nat := 0
+  metavars : Nat := 0
+  localFacts : Nat := 0
+  localData : Nat := 0
+  localSize : Nat := 0
+  difficulty : Float := 1.0
   subgoals : Nat := 1
   exactLocal : Bool := false
   contradiction : Bool := false
@@ -232,6 +242,7 @@ structure PlannerTransitionView where
   family : String
   operation : String
   cost : Float := 1.0
+  progress : Float := 0.5
   executable : Bool := true
 deriving Inhabited, Repr
 
@@ -239,6 +250,7 @@ structure PlannerObservationView where
   transition? : Option String := none
   outcome : String
   failureClass? : Option String := none
+  detail? : Option String := none
 deriving Inhabited, Repr
 
 structure PlannerObjectView where
@@ -264,6 +276,8 @@ structure PlannerRequestV2 where
   workspaceVersion : Nat
   budget : PlannerBudgetView
   root : PlannerRootView
+  structuredThoughts : Bool := true
+  leanCandidates : Bool := false
   regions : Array PlannerRegionView := #[]
   nodes : Array PlannerNodeView := #[]
   transitions : Array PlannerTransitionView := #[]
@@ -303,7 +317,8 @@ deriving Inhabited, Repr
 structure PlannerThoughtView where
   id : String
   kind : String
-  expressionRef : String
+  expressionRef : String := ""
+  expression? : Option String := none
   dependencies : Array String := #[]
 deriving Inhabited, Repr
 
@@ -326,18 +341,26 @@ private def plannerRegionToJson (region : PlannerRegionView) : Json := Json.mkOb
 
 private def plannerNodeToJson (node : PlannerNodeView) : Json := Json.mkObj [
   ("id", node.id), ("depth", node.depth), ("goal", node.goal),
+  ("features", Json.mkObj [
+    ("target_size", node.targetSize), ("target_depth", node.targetDepth),
+    ("binders", node.binders), ("logical_nodes", node.logicalNodes),
+    ("metavars", node.metavars), ("local_facts", node.localFacts),
+    ("local_data", node.localData), ("local_size", node.localSize),
+    ("difficulty", toJson node.difficulty)]),
   ("signals", Json.mkObj [("subgoals", node.subgoals), ("exact_local", node.exactLocal),
     ("contradiction", node.contradiction)])]
 
 private def plannerTransitionToJson (transition : PlannerTransitionView) : Json := Json.mkObj [
   ("id", transition.id), ("from", transition.sourceId), ("to", toJson transition.targetIds),
   ("family", transition.family), ("operation", transition.operation),
-  ("cost", toJson transition.cost), ("executable", transition.executable)]
+  ("cost", toJson transition.cost), ("progress", toJson transition.progress),
+  ("executable", transition.executable)]
 
 private def plannerObservationToJson (observation : PlannerObservationView) : Json := Json.mkObj [
   ("transition", observation.transition?.map Json.str |>.getD Json.null),
   ("outcome", observation.outcome),
-  ("class", observation.failureClass?.map Json.str |>.getD Json.null)]
+  ("class", observation.failureClass?.map Json.str |>.getD Json.null),
+  ("detail", observation.detail?.map Json.str |>.getD Json.null)]
 
 private def plannerObjectToJson (object : PlannerObjectView) : Json := Json.mkObj [
   ("id", object.id), ("kind", object.kind), ("status", object.status),
@@ -356,8 +379,11 @@ def plannerRequestToJson (request : PlannerRequestV2) : Json := Json.mkObj [
     ("previous_confidence", toJson request.memory.confidence)]),
   ("budget", Json.mkObj [("remaining_ms", request.budget.remainingMs),
     ("remaining_atlas_work", request.budget.remainingAtlasWork)]),
+  ("capabilities", Json.mkObj [
+    ("structured_thought_expressions", request.structuredThoughts),
+    ("lean_candidates", request.leanCandidates)]),
   ("root", Json.mkObj [("id", request.root.id), ("shape", request.root.shape),
-    ("goal", request.root.goal)]),
+    ("goal", request.root.goal), ("locals", toJson request.root.locals)]),
   ("regions", Json.arr (request.regions.map plannerRegionToJson)),
   ("nodes", Json.arr (request.nodes.map plannerNodeToJson)),
   ("transitions", Json.arr (request.transitions.map plannerTransitionToJson)),
@@ -447,10 +473,16 @@ def parsePlannerResponse (text : String) (maxItems : Nat := 64) : Except String 
         let id? := (item.getObjVal? "id").toOption.bind (·.getStr?.toOption)
         let kind? := (item.getObjVal? "kind").toOption.bind (·.getStr?.toOption)
         let ref? := (item.getObjVal? "expression_ref").toOption.bind (·.getStr?.toOption)
-        if let (some id, some kind, some expressionRef) := (id?, kind?, ref?) then
-          let dependencies := (item.getObjVal? "dependencies").toOption.bind
-            (·.getArr?.toOption) |>.map (·.filterMap (·.getStr?.toOption)) |>.getD #[]
-          thoughts := thoughts.push { id, kind, expressionRef, dependencies }
+        let expression? :=
+          ((item.getObjVal? "expression").toOption.bind (·.getStr?.toOption)).orElse (fun _ =>
+            ((item.getObjVal? "lean_expression").toOption.bind (·.getStr?.toOption)).orElse (fun _ =>
+              (item.getObjVal? "term").toOption.bind (·.getStr?.toOption)))
+        if let (some id, some kind) := (id?, kind?) then
+          let expressionRef := ref?.getD ""
+          unless expressionRef.isEmpty && expression?.isNone do
+            let dependencies := (item.getObjVal? "dependencies").toOption.bind
+              (·.getArr?.toOption) |>.map (·.filterMap (·.getStr?.toOption)) |>.getD #[]
+            thoughts := thoughts.push { id, kind, expressionRef, expression?, dependencies }
   let mut leanCandidates : Array String := #[]
   if let .ok value := json.getObjVal? "lean_candidates" then
     if let .ok items := value.getArr? then

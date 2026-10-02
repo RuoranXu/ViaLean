@@ -83,7 +83,12 @@ elab (name := vialeanDatasetCase)
   let datasetName := dataset.getString
   let splitName := split.getString
   let name := caseName.getString
-  match <- runSearchWithRouter goal cfg (mathlibRouter cfg) with
+  let outcome <-
+    withOptions (fun options => options.setNat `maxRecDepth 10000) <|
+      withTheReader Core.Context
+        (fun context => { context with maxRecDepth := max context.maxRecDepth 10000 }) <|
+          runSearchWithRouter goal cfg (mathlibRouter cfg)
+  match outcome with
   | .solved proof stats =>
       liftM (m := IO) <| IO.println (datasetResult datasetName splitName name true stats (budgetSec := cfg.timeoutSec)).toJson.compress
       goal.assign proof

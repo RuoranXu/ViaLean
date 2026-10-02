@@ -18,6 +18,7 @@ structure WorkspaceObject where
   dependencies : Array UInt64 := #[]
   status : KnowledgeStatus := .speculative
   origin : TransitionOrigin := .model
+  display? : Option String := none
 
 inductive FailureClass
   | typeMismatch | unification | noProgress | branchGrowth | branchExplosion
@@ -40,6 +41,7 @@ structure ModelThought where
   kind : ConjectureKind
   expression : Expr
   dependencies : Array UInt64 := #[]
+  display? : Option String := none
 
 structure ModelThoughtBatch where
   epoch : Nat
@@ -200,7 +202,7 @@ def registerObject (ref : IO.Ref ProofWorkspace) (kind : ConjectureKind)
     (expression : Expr) (type? : Option Expr := none)
     (status : KnowledgeStatus := .verified) (origin : TransitionOrigin := .derived)
     (dependencies : Array UInt64 := #[]) (blockers : Array UInt64 := #[])
-    (utility : Float := 0.5) : IO (UInt64 × Bool) := do
+    (utility : Float := 0.5) (display? : Option String := none) : IO (UInt64 × Bool) := do
   let workspace ← ref.get
   if let some existing := workspace.objects.find? fun object =>
       object.kind == kind && object.expression == expression &&
@@ -215,7 +217,7 @@ def registerObject (ref : IO.Ref ProofWorkspace) (kind : ConjectureKind)
     hash (baseId, workspace.objects.size)
   else baseId
   let object : WorkspaceObject := {
-    id, kind, expression, type?, dependencies, blockers, status, origin, utility }
+    id, kind, expression, type?, dependencies, blockers, status, origin, utility, display? }
   ref.set { workspace with
     objects := workspace.objects.push object
     version := workspace.version + 1 }
@@ -243,6 +245,7 @@ def absorbThoughtBatch (ref : IO.Ref ProofWorkspace) (batch : ModelThoughtBatch)
         expression := thought.expression
         dependencies := thought.dependencies
         status := .speculative
+        display? := thought.display?
         origin := .model
       }
   let added := objects.size - before.objects.size

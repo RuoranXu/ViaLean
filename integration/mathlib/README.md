@@ -11,7 +11,7 @@ The dependency is pinned to Google DeepMind's Lean 4 miniF2F revision
 The integration supplies:
 
 - `mathlibLeafSolver`: a bounded trusted portfolio of `norm_num`, `omega`,
-  `linarith`, `ring_nf`, and `aesop`;
+  `linarith`, `nlinarith`, `ring_nf`, and `field_simp`;
 - `mathlibRouter`: mathlib leaves plus ViaLean's dependency-free native
   fallback;
 - `propose_mathlib`: the ordinary Atlas/search engine using that router;
@@ -34,7 +34,7 @@ lake exe cache get
 lake test
 ```
 
-To force a fresh elaboration and collect the six kernel-checked case records:
+To force a fresh elaboration and collect the seven kernel-checked case records:
 
 ```console
 lake env lean ViaLeanMathlibTest/MiniF2F.lean > minif2f-smoke.jsonl
@@ -44,6 +44,11 @@ Each output line is standalone JSON containing the dataset, split, theorem
 name, solved flag, wall time, search attempts, model calls, replans, and Atlas
 work. A failed proof writes its `solved: false` record and then fails the Lean
 process, so benchmark data cannot silently report an unverified success.
+
+The tracked `ViaLeanMathlibTest/MiniF2FTestDataset.lean` source contains the
+first 24 test-split statements used by the fixed evaluation slice. Run it
+case-by-case with `benchmarks/run_minif2f_cases.ps1`; the complete command and
+result schema are documented in `benchmarks/README.md`.
 
 The root `lake test` remains the fast zero-dependency suite. This integration
 test is separate because mathlib's compiled cache is large and mathlib requires

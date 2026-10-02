@@ -4,7 +4,7 @@ ViaLean exposes three bounded, untrusted model modes. Planner v2 is the primary 
 
 ## Planner v2: graph planning and candidate creation
 
-`modelMode := "planner"` sends a compressed view of the versioned Proof Atlas: remaining budgets, root, coarse strategy regions, representative nodes, typed executable transitions, and structured observations. It calls the model again only after the Workspace version changes and never beyond `plannerMaxCalls`.
+`modelMode := "planner"` sends a compressed view of the versioned Proof Atlas: remaining budgets, the root goal and local context, coarse strategy regions, representative nodes, typed executable transitions, persistent objects, and structured observations. A neural epoch can add mathematical objects or request bounded symbolic expansion; accepted objects and per-thought rejection feedback become the delta for the next epoch. The loop remains bounded by `plannerMaxCalls` and the global deadline.
 
 The response may combine transition policy/value/confidence, a region strategy, bounded expansion requests, typed thoughts, and optional Lean candidates:
 
@@ -15,19 +15,27 @@ The response may combine transition policy/value/confidence, a region strategy, 
   "transition_scores": [{"id":"13", "policy":0.88, "value":0.91}],
   "strategy": {"primary_family":"equality", "objective":"join the local chain"},
   "thoughts": [
-    {"id":"bridge-b", "kind":"equality_bridge", "expression_ref":"b", "dependencies":[]}
+    {"id":"bridge-b", "kind":"equality_bridge", "expression_ref":"b", "dependencies":[]},
+    {"id":"helper", "kind":"helper_lemma", "expression":"f a = f b", "dependencies": ["bridge-b"]}
   ],
   "lean_candidates": [{"code":"by ..."}]
 }
 ```
 
-Typed thoughts can be `direct_term`/`exact`, `equality_bridge`, `iff_bridge`, `witness`/`intermediate_value`, or `helper_lemma`/`cut`. `expression_ref` names an existing local or environment constant; Lean resolves and validates every thought independently before adding its action to the Workspace. Invalid siblings do not discard valid thoughts. Lean candidates use the same experimental sandbox as interactive mode and are ignored unless raw code is explicitly enabled.
+Typed thoughts can be `direct_term`/`exact`, `equality_bridge`, `iff_bridge`, `witness`/`intermediate_value`, `helper_lemma`/`cut`, `invariant`, or `generalization`. Each thought supplies exactly one of:
+
+- `expression_ref`, naming a visible local, environment constant, or persistent object; or
+- `expression`, an open-world Lean term or proposition invented by the model.
+
+Structured expressions are not a tactic allowlist. They use Lean's term parser and elaborator in the current goal context, with an expected type derived from the thought kind. Tactic blocks, commands, evaluation facilities, option changes, quotations, and macros are rejected; source length, heartbeats, term size, unresolved metavariables, loose binders, and `sorry` are bounded or rejected. Semantic validators then check that the result is a genuine witness, bridge, cut, or proof term. Every thought is processed independently, so one invalid sibling does not discard the useful ones.
+
+The request advertises `capabilities.structured_thought_expressions` and `capabilities.lean_candidates`. Raw Lean proof candidates are returned to search only when both `modelLeanCode` and `experimentalRawLeanCode` are enabled; structured mathematical thoughts remain available without enabling raw tactic code.
 
 The fully serialized request—not merely its components—is hard-capped by `plannerMaxPayloadChars`. Compression drops old observations, non-representative nodes/transitions and long goal text in that order while retaining valid JSON.
 
 Expansion requests use region_id, optional family, extra_depth, extra_width, and reason_code (legacy reason is also accepted). They allocate bounded symbolic work; they do not select or accept a proof. Strategy plans may include secondary_families, horizon, and stop_condition so one epoch can express a multi-step intent.
 
-Each later epoch receives only observations and objects newer than its lastSeenVersion, plus compact memory for the active family and confidence. Workspace object expressions are serialized as opaque IDs with status, blockers, and utility; raw Lean Expr values and local replay handles never cross the provider boundary.
+Each later epoch receives only observations and objects newer than its `lastSeenVersion`, plus compact memory for the active family and confidence. Accepted neural objects carry a bounded pretty-printed display so the model can refer to the mathematics it introduced; internally they remain Lean `Expr` values and are never deserialized from provider-controlled handles. Rejected thoughts become observations with a failure class and bounded `detail`, allowing the next epoch to repair a malformed type, unavailable name, unsafe term, or unproductive conjecture.
 
 For deterministic replay tests, __FIRST_REGION_ID__ and __FIRST_REGION_FAMILY__ in modelReplayResponse are replaced from the actual serialized request. This exercises the same region-selection path without hard-coding run-specific IDs.
 
@@ -219,6 +227,25 @@ The process is spawned directly without a shell, reads one JSON request from std
 `modelProvider := "openai-compatible"`, `"openai"`, and `"ollama"` use `/v1/chat/completions`, covering hosted APIs and compatible local Ollama/llama.cpp servers. Transport invokes `curl` without a shell.
 
 The optional key is read from the environment variable named by `modelApiKeyEnv` (default `VIALEAN_API_KEY`), rejected if it contains a newline, placed in a temporary curl config, and never included in traces or process arguments.
+
+For example, any compatible hosted endpoint can be connected without provider-specific code:
+
+```powershell
+$env:VIALEAN_API_KEY = "..."
+```
+
+```lean
+propose
+  (ai := true)
+  (modelMode := "planner")
+  (modelProvider := "openai-compatible")
+  (modelEndpoint := "https://api.example.com/chat/completions")
+  (modelName := "reasoning-model")
+  (modelApiKeyEnv := "VIALEAN_API_KEY")
+  (plannerMaxCalls := 4)
+```
+
+The provider receives a succession of bounded Atlas deltas rather than a single proof prompt: symbolic expansion informs the model, structured conjectures alter subsequent symbolic search, and validation outcomes return to the model on the next epoch.
 
 ### Replay
 

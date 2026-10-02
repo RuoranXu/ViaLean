@@ -26,7 +26,7 @@ def failureClassFor (action : ProofAction) : FailureClass :=
       | .libraryApply _ => .premiseMismatch
       | .equalityMid _ | .iffMid _ => .unification
       | .witness _ => .typeMismatch
-      | .cutType _ => .openGoals
+      | .cutType _ | .verifiedCut _ _ | .caseSplit _ => .openGoals
       | .directTerm _ | .structural _ => .noProgress
 
 def plannerThoughtId? (action : ProofAction) : Option UInt64 :=
@@ -38,9 +38,11 @@ def plannerThoughtId? (action : ProofAction) : Option UInt64 :=
   | _ => none
 
 def orderActions
-    (state : SearchState) (guidance? : Option ModelGuidance)
+    (state : SearchState) (nodeId? : Option AtlasNodeId)
+    (guidance? : Option ModelGuidance)
     (actions : Array ProofAction) : MetaM (Array ProofAction) := do
   let stats ← state.scheduler.snapshot
+  let workspace ← state.workspace.get
   let total := stats.fold (init := 0) fun total _ family =>
     total + family.attempts
   let baseScore (action : ProofAction) :=
@@ -54,9 +56,13 @@ def orderActions
     let base := baseScore action
     let actionSignal? := guidance?.bind fun guidance =>
       ModelProtocol.ModelGuidance.score? guidance action.fingerprint
+    let symbolicSignal? := nodeId?.bind fun nodeId =>
+      workspace.atlas.familyPotential? nodeId action.family.toStrategyFamily
+    -- A root value is not an action value. Per-action model scores take
+    -- precedence; otherwise the verified bounded future supplies the signal.
     let signal? := match actionSignal? with
       | some signal => some signal
-      | none => guidance?.map (·.value)
+      | none => symbolicSignal?
     let blended :=
       ModelProtocol.blendScore base signal? state.config.modelWeight
     blended / max 0.1 action.estimatedCost

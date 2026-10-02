@@ -39,10 +39,11 @@ open Lean Meta Elab Tactic ViaLean
 
 #guard
   match ModelProtocol.parsePlannerResponse
-      r#"{"thoughts":[{"id":"11","kind":"equality_bridge","expression_ref":"b","dependencies":["2"]}],"lean_candidates":[{"code":"by exact h"}]}"# with
-  | .ok response => response.thoughts.size == 1 &&
+      r#"{"thoughts":[{"id":"11","kind":"equality_bridge","expression_ref":"b","dependencies":["2"]},{"id":"12","kind":"helper_lemma","expression":"P ∨ Q"}],"lean_candidates":[{"code":"by exact h"}]}"# with
+  | .ok response => response.thoughts.size == 2 &&
       response.thoughts[0]!.expressionRef == "b" &&
       response.thoughts[0]!.dependencies == #["2"] &&
+      response.thoughts[1]!.expression? == some "P ∨ Q" &&
       response.leanCandidates == #["by exact h"]
   | .error _ => false
 
@@ -63,6 +64,11 @@ elab "v3_sandbox_guard" : tactic => do
       throwError "unsafe or unsupported model code passed: {code}"
   match parseSafeModelTactic env "by exact True.intro" with
   | .error error => throwError "reviewed exact tactic was rejected: {error}"
+  | .ok _ => pure ()
+  if (parseSafeModelTerm env "by exact True.intro").isOk then
+    throwError "structured model terms accepted a tactic block"
+  match parseSafeModelTerm env "P ∨ Q" with
+  | .error error => throwError "ordinary structured proposition was rejected: {error}"
   | .ok _ => pure ()
   match parseSafeModelTacticWithKinds env "by v3_custom_tactic" #[`v3CustomTactic] with
   | .error error => throwError "explicit syntax capability was rejected: {error}"
