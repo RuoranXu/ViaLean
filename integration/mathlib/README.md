@@ -1,60 +1,24 @@
-# ViaLean mathlib / miniF2F integration
+# ViaLean mathlib integration
 
 This isolated Lake project keeps the ViaLean core dependency-free while
-compiling the same sources inside a real mathlib environment.
+compiling the same search engine inside a pinned mathlib environment.
 
-The dependency is pinned to Google DeepMind's Lean 4 miniF2F revision
-`f0a20e14c1eeccd859d51bb4c2b3ee487889c303`, whose manifest pins
-`formal_conjectures` and mathlib `v4.27.0` (mathlib commit
-`a3a10db0e9d66acbebf76c5e6a135066525ac900`).
+The adapter pins mathlib `v4.27.0` and supplies:
 
-The integration supplies:
+- `mathlibLeafSolver`, a bounded portfolio of reviewed mathlib tactics;
+- `mathlibRouter`, which combines those leaves with ViaLean's native fallback;
+- `propose_mathlib`, the ordinary Atlas/search tactic using that router; and
+- the reviewed syntax boundary for optional model-generated mathlib tactics.
 
-- `mathlibLeafSolver`: a bounded trusted portfolio of `norm_num`, `omega`,
-  `linarith`, `nlinarith`, `ring_nf`, and `field_simp`;
-- `mathlibRouter`: mathlib leaves plus ViaLean's dependency-free native
-  fallback;
-- `propose_mathlib`: the ordinary Atlas/search engine using that router;
-- `vialean_dataset_case`: a reusable tactic that emits one
-  `vialean.dataset.v1` JSON record and accepts only a finalized proof;
-- `#vialean_dataset_eval_once`: a command for matched single-search
-  comparisons that records both solved and unsolved targets without retry
-  profiles or corpus interruption;
-- validation- and test-split miniF2F smoke cases with library retrieval
-  disabled.
-
-The smoke cases import only `MiniF2F.ProblemImports` and reproduce the upstream
-statements. They do not import `MiniF2F.Valid` or `MiniF2F.Test`, because those
-files declare the target theorems with `sorry`; importing them would let premise
-retrieval select the answer itself.
-
-Build with:
+Build the adapter with:
 
 ```console
 cd integration/mathlib
 lake update
 lake exe cache get
-lake test
+lake build
 ```
 
-To force a fresh elaboration and collect the seven kernel-checked case records:
-
-```console
-lake env lean ViaLeanMathlibTest/MiniF2F.lean > minif2f-smoke.jsonl
-```
-
-Each output line is standalone JSON containing the dataset, split, theorem
-name, solved flag, wall time, search attempts, model calls, replans, and Atlas
-work. A failed proof writes its `solved: false` record and then fails the Lean
-process, so benchmark data cannot silently report an unverified success.
-
-The tracked `ViaLeanMathlibTest/MiniF2FTestDataset.lean` source contains the
-first 24 test-split statements used for local corpus evaluation.
-`#vialean_dataset_eval` runs the configured retry profiles and records every
-outcome. Use `#vialean_dataset_eval_once` for matched comparisons under one
-identical search budget; it performs no automatic retries, so model calls and
-Atlas allocations remain directly comparable.
-
-The root `lake test` remains the fast zero-dependency suite. This integration
-test is separate because mathlib's compiled cache is large and mathlib requires
-its matching Lean toolchain.
+The root package remains dependency-free. Model proposals and mathlib tactic
+results are accepted only after ViaLean finalizes an ordinary Lean proof term
+and the kernel checks it.

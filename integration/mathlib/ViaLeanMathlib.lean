@@ -378,7 +378,7 @@ private def containsLocalFVar (root : Expr) : Bool := Id.run do
   return false
 
 /-- Collect distinct variable-dependent division denominators, smallest first.
-This is operator-structural and independent of theorem names or benchmark data. -/
+This is operator-structural and independent of theorem names or external datasets. -/
 private def divisionDenominators (roots : Array Expr) : Array Expr := Id.run do
   let mut pending := roots
   let mut result := #[]

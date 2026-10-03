@@ -49,7 +49,6 @@ ViaLean uses the Lean toolchain pinned by `lean-toolchain`.
 git clone https://github.com/RuoranXu/ViaLean.git
 cd ViaLean
 lake build
-lake test
 ```
 
 Import the library and invoke `propose` inside a proof:
@@ -78,17 +77,16 @@ Mathlib support lives in a separate Lake project, so applications that use only 
 cd integration/mathlib
 lake update
 lake exe cache get
-lake test
+lake build
 ```
 
-The integration pins Lean and mathlib 4.27.0 together with the Google DeepMind Lean 4 miniF2F revision. It provides:
+The integration pins mathlib 4.27.0 and provides:
 
 - `mathlibRouter`, combining ViaLean search with a bounded mathlib leaf portfolio;
 - `propose_mathlib`, the standard search tactic configured for that router;
-- `vialean_dataset_case`, a kernel-checked JSONL evaluation command;
-- miniF2F validation and test examples with theorem-answer retrieval disabled.
+- reviewed mathlib tactics for optional model-generated proof candidates.
 
-See [the mathlib integration guide](integration/mathlib/README.md) for setup and dataset details.
+See [the mathlib integration guide](integration/mathlib/README.md) for setup details.
 
 ## Model integration
 
@@ -115,29 +113,12 @@ The included [command adapter](examples/model_adapter.py) implements the protoco
 
 Raw model-generated Lean tactics are an explicit experimental capability. They require both `modelLeanCode` and `experimentalRawLeanCode`; accepted syntax runs with an independent heartbeat budget on a fresh goal and remains subject to final kernel validation.
 
-## Performance
+## Traces
 
-A matched live-API check evaluated six pinned miniF2F test statements: four
-challenging targets and two solved controls. Each target received one symbolic
-search and one `deepseek-flash` planner-assisted search.
-
-| Configuration | Evaluated | Solved | Challenge subset | Controls | Model calls |
-|---|---:|---:|---:|---:|---:|
-| Symbolic | 6 | **2** | 0 / 4 | 2 / 2 | 0 |
-| Planner-assisted | 6 | **3** | 1 / 4 | 2 / 2 | 6 |
-
-Both modes used a 30-second per-target budget, disabled theorem-answer
-retrieval, and shared a 384-unit Atlas cap. The planner was allowed at most one
-model call per target; generated Lean candidates remained subject to the
-reviewed mathlib syntax boundary and final kernel validation. The additional
-solved target was `mathd_algebra_141`, with no internal errors or search
-exceptions in either mode. This deliberately selected six-target check is not a
-full-split score or a statistical claim.
-## Benchmarking and traces
-
-`ViaLean.Benchmark` provides eight evaluation modes ranging from native symbolic search to planner-guided and interactive search. The `vialean.benchmark.v3` record format captures latency, proof attempts, model calls, replans, Atlas size, and Meta work.
-
-Training and analysis traces use the `vialean.training.v3` event stream. Traces contain stable identifiers, decisions, structured outcomes, counts, and failure classes while keeping provider credentials and Lean-internal replay handles out of serialized data.
+Training and analysis traces use the `vialean.training.v3` event stream. Traces
+contain stable identifiers, decisions, structured outcomes, counts, and failure
+classes while keeping provider credentials and Lean-internal replay handles out
+of serialized data.
 
 ## Configuration
 
@@ -164,8 +145,7 @@ All limits are finite and configuration-driven. The implementation contains no L
 | `ViaLean/Planner/` | Model guidance, conjectures, and planning |
 | `ViaLean/Model/` | Provider protocols and process integration |
 | `ViaLean/Solver/` | Leaf-solver routing |
-| `ViaLeanTest/` | Dependency-free regression and interaction tests |
-| `integration/mathlib/` | Mathlib adapter and miniF2F evaluation |
+| `integration/mathlib/` | Optional pinned mathlib adapter |
 
 For the detailed module map and design invariants, see [VIALEAN_IMPLEMENTATION.md](VIALEAN_IMPLEMENTATION.md).
 
@@ -179,6 +159,4 @@ Academic citation metadata is provided in [`CITATION.cff`](CITATION.cff).
 
 ## License
 
-ViaLean is released under the MIT License. Adapted third-party benchmark
-statements retain their original terms; see
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+ViaLean is released under the MIT License.

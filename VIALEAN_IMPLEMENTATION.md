@@ -69,12 +69,11 @@ The shared deadline is checked in controller and frontier loops, recomputed afte
 - `ViaLean/Search/Execute.lean`, `Search/Controller.lean`: transactional Meta execution and one cancellation deadline over the full search.
 - `ViaLean/Search/ModelCode.lean`: the experimental raw-code parser and exact syntax allowlist.
 - `ViaLean/Search.lean`: AND/OR orchestration over the split services.
-- `ViaLean/Benchmark.lean`, `Trace.lean`: matched-compute ablations and redacted stable JSONL events.
+- `ViaLean/Trace.lean`: redacted stable JSONL events.
 - `ViaLean/Compose.lean`, `Validate.lean`: proof construction and trust boundary.
 - `ViaLean/Tactic.lean`: `propose` and `propose?`.
-- `ViaLeanTest/`: regression, frontier diversity, protocol, replay, and safety tests.
-- `integration/mathlib/`: isolated mathlib/Lean 4 miniF2F package, trusted math
-  tactic leaf router, `propose_mathlib`, and non-leaking benchmark smoke tests.
+- `integration/mathlib/`: isolated pinned mathlib adapter, trusted math tactic
+  leaf router, and `propose_mathlib` frontend.
 
 ## Safety invariants
 

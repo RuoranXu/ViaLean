@@ -3,6 +3,5 @@
 /build/
 /.downloads/
 /.vialean-stats.json
-/benchmarks/results/*.raw.jsonl
 *.olean
 *.ilean

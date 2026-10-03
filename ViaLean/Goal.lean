@@ -18,7 +18,7 @@ structure LocalInfo where
 
 /-- Dataset-independent structural features of a proof state. These cheap,
 kernel-side measurements contain no theorem names, numeral identities, or
-benchmark labels, so they can drive either symbolic search or a learned model. -/
+dataset-specific labels, so they can drive either symbolic search or a learned model. -/
 structure GoalMetrics where
   targetSize   : Nat := 0
   targetDepth  : Nat := 0

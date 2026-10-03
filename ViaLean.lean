@@ -1,6 +1,5 @@
 import ViaLean.Tactic
 import ViaLean.Search
-import ViaLean.Benchmark
 import ViaLean.Validate
 import ViaLean.Compose
 import ViaLean.Action
