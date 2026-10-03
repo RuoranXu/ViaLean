@@ -14,7 +14,7 @@ The core engine runs fully offline and has no external prover, native extension,
 - **Local synthesis throughout search** - complete inhabitants and useful partial applications are collected at every visited goal and reused by later search.
 - **Budget-aware control** - work, rendering, provider calls, deadlines, and search families have explicit independent bounds.
 - **Kernel-checked results** - failed branches are rolled back, unresolved metavariables are rejected, and successful candidates pass final type checking.
-- **Optional mathlib integration** - the standalone core remains lightweight while a separate adapter provides mathlib tactics and miniF2F evaluation.
+- **Optional mathlib integration** - the standalone core remains lightweight while a separate adapter provides mathlib tactics.
 
 ## How it works
 
