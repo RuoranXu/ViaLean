@@ -417,7 +417,64 @@ private def jsonFloat (json : Json) (field : String) (fallback : Float) : Float 
   | .ok value => clamp01 ((fromJson? value : Except String Float).toOption.getD fallback)
   | .error _ => fallback
 
+private def stripPlannerCodeFence (text : String) : String :=
+  let text := text.trimAscii.toString
+  if text.startsWith "```" then
+    let lines := text.splitOn "\n"
+    let body := lines.drop 1
+    let body := if body.reverse.head?.any (fun line => line.trimAscii.toString.startsWith "```") then
+      body.reverse.drop 1 |>.reverse
+    else body
+    String.intercalate "\n" body |>.trimAscii.toString
+  else text
+
+private def firstPlannerObjectText? (text : String) : Option String :=
+  let rec objectAt (chars : List Char) (started : Bool) (depth : Nat)
+      (inString escaped : Bool) (acc : List Char) : Option String :=
+    match chars with
+    | [] => none
+    | c :: rest =>
+        if !started then
+          if c = '{' then objectAt rest true 1 false false [c]
+          else objectAt rest false 0 false false []
+        else
+          let acc := c :: acc
+          if inString then
+            if escaped then objectAt rest true depth true false acc
+            else if c = '\\' then objectAt rest true depth true true acc
+            else if c = '"' then objectAt rest true depth false false acc
+            else objectAt rest true depth true false acc
+          else if c = '"' then objectAt rest true depth true false acc
+          else if c = '{' then objectAt rest true (depth + 1) false false acc
+          else if c = '}' then
+            if depth = 1 then some (String.ofList acc.reverse)
+            else objectAt rest true (depth - 1) false false acc
+          else objectAt rest true depth false false acc
+  let looksLikePlanner (json : Json) : Bool :=
+    (json.getObjVal? "root_value").isOk ||
+    (json.getObjVal? "thoughts").isOk ||
+    (json.getObjVal? "transition_scores").isOk ||
+    (json.getObjVal? "expansion_requests").isOk
+  let rec scan : List Char -> Option String
+    | [] => none
+    | c :: rest =>
+        if c = '{' then
+          match objectAt (c :: rest) false 0 false false [] with
+          | some objectText =>
+              match Json.parse objectText with
+              | .ok json => if looksLikePlanner json then some objectText else scan rest
+              | .error _ => scan rest
+          | none => scan rest
+        else scan rest
+  scan text.toList
+
+private def normalizePlannerResponse (text : String) : String :=
+  let cleaned := stripPlannerCodeFence text
+  match Json.parse cleaned with
+  | .ok _ => cleaned
+  | .error _ => (firstPlannerObjectText? cleaned).getD cleaned
 def parsePlannerResponse (text : String) (maxItems : Nat := 64) : Except String PlannerResponseV2 := do
+  let text := normalizePlannerResponse text
   let json ← Json.parse text.trimAscii.toString
   let rootValue := jsonFloat json "root_value" 0.5
   let confidence := jsonFloat json "confidence" 0.5

@@ -224,7 +224,7 @@ The process is spawned directly without a shell, reads one JSON request from std
 
 ### OpenAI-compatible API
 
-`modelProvider := "openai-compatible"`, `"openai"`, and `"ollama"` use `/v1/chat/completions`, covering hosted APIs and compatible local Ollama/llama.cpp servers. Transport invokes `curl` without a shell.
+`modelProvider := "openai-compatible"`, `"openai"`, and `"ollama"` send requests to the configured Chat Completions endpoint, covering hosted APIs and compatible local Ollama/llama.cpp servers. Transport invokes `curl` without a shell.
 
 The optional key is read from the environment variable named by `modelApiKeyEnv` (default `VIALEAN_API_KEY`), rejected if it contains a newline, placed in a temporary curl config, and never included in traces or process arguments.
 
@@ -246,6 +246,44 @@ propose
 ```
 
 The provider receives a succession of bounded Atlas deltas rather than a single proof prompt: symbolic expansion informs the model, structured conjectures alter subsequent symbolic search, and validation outcomes return to the model on the next epoch.
+
+#### DeepSeek planner profile
+
+DeepSeek's current Chat Completions endpoint supports JSON output and reasoning
+effort controls. The repository includes a reusable configuration macro in
+[`examples/DeepSeekPlanner.lean`](../examples/DeepSeekPlanner.lean). It uses
+`deepseek-flash` for lower-cost integration tests; change `modelName` to a
+currently available stronger model such as `deepseek-v4-pro` for evaluation.
+
+```lean
+import ViaLean
+
+example {alpha : Type} (a b : alpha) (h : a = b) : b = a := by
+  propose
+    (ai := true)
+    (modelMode := "planner")
+    (modelProvider := "openai-compatible")
+    (modelEndpoint := "https://api.deepseek.com/chat/completions")
+    (modelName := "deepseek-flash")
+    (modelJsonMode := true)
+    (modelReasoningEffort := "high")
+    (modelMaxTokens := 8192)
+    (modelTimeoutMs := 120000)
+    (timeoutSec := 180)
+    (plannerMaxCalls := 3)
+```
+
+`modelTimeoutMs` is bounded by the remaining global `timeoutSec`. Reasoning
+tokens consume the provider's completion allowance, so a very small
+`modelMaxTokens` can end before the final planner JSON is emitted. With JSON
+mode enabled, the prompt still explicitly requests JSON, as required by the
+provider.
+
+Planner calls are intentionally not a transcript replay. Continuity is carried
+by the versioned proof workspace: accepted objects, rejected-thought details,
+executed transition outcomes, newly expanded regions, and the previous strategy
+are serialized into the next bounded request. This keeps private model
+reasoning out of traces while preserving the neural-symbolic feedback loop.
 
 ### Replay
 
@@ -280,6 +318,8 @@ The provider receives a succession of bounded Atlas deltas rather than a single 
 | `frontierContextChars` | `16000` | Atlas rendering budget. |
 | `modelContextChars` | `12000` | Goal/action rendering budget. |
 | `modelMaxResponseChars` | `65536` | Provider response bound. |
+| `modelJsonMode` | `false` | Request a JSON object from compatible hosted endpoints. |
+| `modelReasoningEffort` | `""` | Optional provider reasoning effort, for example `high`. |
 | `modelReplayResponse` | `""` | Fixed deterministic response. |
 
 ## Privacy and trust

@@ -46,6 +46,8 @@ structure ProposeConfig where
   modelMaxResponseChars  : Nat := 65536
   modelContextChars      : Nat := 12000
   modelTemperature       : Float := 0.0
+  modelJsonMode          : Bool := false
+  modelReasoningEffort   : String := ""
   modelWeight            : Float := 0.65
   modelMaxRounds          : Nat := 4
   modelMaxFeedbackEvents  : Nat := 48

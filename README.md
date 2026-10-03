@@ -117,14 +117,22 @@ Raw model-generated Lean tactics are an explicit experimental capability. They r
 
 ## Performance
 
-The current model-free configuration solves **11 of 24 problems (45.8%)** in a fixed-revision evaluation slice from the miniF2F test split. All accepted proofs are finalized and checked by Lean's kernel; the run uses one shared mathlib import and a nominal 15-second search budget per case.
+A matched live-API check evaluated six pinned miniF2F test statements: four
+challenging targets and two solved controls. Each target received one symbolic
+search and one `deepseek-flash` planner-assisted search.
 
-| Dataset | Split | Configuration | Evaluated | Solved | Pass rate |
-|---|---|---|---:|---:|---:|
-| miniF2F | test, cases 1–24 | neural-ready symbolic search, no external model | 24 | **11** | **45.8%** |
+| Configuration | Evaluated | Solved | Challenge subset | Controls | Model calls |
+|---|---:|---:|---:|---:|---:|
+| Symbolic | 6 | **2** | 0 / 4 | 2 / 2 | 0 |
+| Planner-assisted | 6 | **3** | 1 / 4 | 2 / 2 | 6 |
 
-This is a measured evaluation subset, not a full-split score. Per-case JSONL records are stored under [`benchmarks/results`](benchmarks/results); the same harness supports full miniF2F runs and model-enabled comparisons. See [Evaluation protocol and corpus notes](benchmarks/README.md).
-
+Both modes used a 30-second per-target budget, disabled theorem-answer
+retrieval, and shared a 384-unit Atlas cap. The planner was allowed at most one
+model call per target; generated Lean candidates remained subject to the
+reviewed mathlib syntax boundary and final kernel validation. The additional
+solved target was `mathd_algebra_141`, with no internal errors or search
+exceptions in either mode. This deliberately selected six-target check is not a
+full-split score or a statistical claim.
 ## Benchmarking and traces
 
 `ViaLean.Benchmark` provides eight evaluation modes ranging from native symbolic search to planner-guided and interactive search. The `vialean.benchmark.v3` record format captures latency, proof attempts, model calls, replans, Atlas size, and Meta work.
@@ -158,7 +166,6 @@ All limits are finite and configuration-driven. The implementation contains no L
 | `ViaLean/Solver/` | Leaf-solver routing |
 | `ViaLeanTest/` | Dependency-free regression and interaction tests |
 | `integration/mathlib/` | Mathlib adapter and miniF2F evaluation |
-| `benchmarks/` | Evaluation protocol and dataset runner |
 
 For the detailed module map and design invariants, see [VIALEAN_IMPLEMENTATION.md](VIALEAN_IMPLEMENTATION.md).
 

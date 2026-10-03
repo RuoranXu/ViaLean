@@ -17,6 +17,9 @@ The integration supplies:
 - `propose_mathlib`: the ordinary Atlas/search engine using that router;
 - `vialean_dataset_case`: a reusable tactic that emits one
   `vialean.dataset.v1` JSON record and accepts only a finalized proof;
+- `#vialean_dataset_eval_once`: a command for matched single-search
+  comparisons that records both solved and unsolved targets without retry
+  profiles or corpus interruption;
 - validation- and test-split miniF2F smoke cases with library retrieval
   disabled.
 
@@ -46,9 +49,11 @@ work. A failed proof writes its `solved: false` record and then fails the Lean
 process, so benchmark data cannot silently report an unverified success.
 
 The tracked `ViaLeanMathlibTest/MiniF2FTestDataset.lean` source contains the
-first 24 test-split statements used by the fixed evaluation slice. Run it
-case-by-case with `benchmarks/run_minif2f_cases.ps1`; the complete command and
-result schema are documented in `benchmarks/README.md`.
+first 24 test-split statements used for local corpus evaluation.
+`#vialean_dataset_eval` runs the configured retry profiles and records every
+outcome. Use `#vialean_dataset_eval_once` for matched comparisons under one
+identical search budget; it performs no automatic retries, so model calls and
+Atlas allocations remain directly comparable.
 
 The root `lake test` remains the fast zero-dependency suite. This integration
 test is separate because mathlib's compiled cache is large and mathlib requires

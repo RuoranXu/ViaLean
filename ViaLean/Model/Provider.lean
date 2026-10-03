@@ -35,8 +35,22 @@ private def plannerSystemPrompt : String :=
   "exact, equality_bridge, iff_bridge, witness, intermediate_value, helper_lemma, cut, invariant, and generalization. " ++
   "An expression is a term or proposition only, never a `by` proof or tactic block. Use names and types shown in root.locals. " ++
   "Lean parses, elaborates, and validates every thought independently; revise rejected thoughts using observation.detail " ++
-  "without discarding useful siblings. Never claim acceptance. Emit lean_candidates only when capabilities.lean_candidates is true."
-private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : Json := Json.mkObj [
+  "without discarding useful siblings. Never claim acceptance. Emit lean_candidates only when capabilities.lean_candidates is true. " ++
+  "Use the exact top-level JSON keys root_value, confidence, preferred_regions, transition_scores, strategy, " ++
+  "expansion_requests, thoughts, and lean_candidates. An expansion item uses region_id, extra_depth, extra_width, " ++
+  "optional family, and reason_code. A thought item uses id, kind, dependencies, and expression_ref or expression. " ++
+  "On later workspace versions, respond to new observations and do not repeat a rejected thought unchanged."
+private def openAIChatJson (cfg : ProposeConfig)
+    (fields : List (String × Json)) : Json :=
+  let fields := if cfg.modelJsonMode then
+    fields ++ [("response_format", Json.mkObj [("type", "json_object")])]
+  else fields
+  let effort := cfg.modelReasoningEffort.trimAscii.toString
+  let fields := if effort.isEmpty then fields else
+    fields ++ [("reasoning_effort", Json.str effort)]
+  Json.mkObj fields
+
+private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : Json := openAIChatJson cfg [
   ("model", cfg.modelName),
   ("temperature", toJson cfg.modelTemperature),
   ("max_tokens", cfg.modelMaxTokens),
@@ -47,7 +61,7 @@ private def openAIRequestJson (cfg : ProposeConfig) (request : ModelRequest) : J
 ]
 
 private def openAIInteractionRequestJson
-    (cfg : ProposeConfig) (request : InteractionRequest) : Json := Json.mkObj [
+    (cfg : ProposeConfig) (request : InteractionRequest) : Json := openAIChatJson cfg [
   ("model", cfg.modelName),
   ("temperature", toJson cfg.modelTemperature),
   ("max_tokens", cfg.modelMaxTokens),
@@ -59,7 +73,7 @@ private def openAIInteractionRequestJson
 ]
 
 private def openAIPlannerRequestJson
-    (cfg : ProposeConfig) (request : ModelProtocol.PlannerRequestV2) : Json := Json.mkObj [
+    (cfg : ProposeConfig) (request : ModelProtocol.PlannerRequestV2) : Json := openAIChatJson cfg [
   ("model", cfg.modelName),
   ("temperature", toJson cfg.modelTemperature),
   ("max_tokens", cfg.modelMaxTokens),
@@ -73,8 +87,19 @@ private def extractOpenAIContent (text : String) : Except String String := do
   let json ← Json.parse text
   let choices ← (← json.getObjVal? "choices").getArr?
   let some first := choices[0]? | throw "API response has no choices"
+  let finishReason? := (first.getObjVal? "finish_reason").toOption.bind
+    (fun value => value.getStr?.toOption)
+  if finishReason? == some "length" then
+    throw "API response was truncated (finish_reason=length); increase modelMaxTokens"
   let message ← first.getObjVal? "message"
-  (← message.getObjVal? "content").getStr?
+  let content? := (message.getObjVal? "content").toOption.bind
+    (fun value => value.getStr?.toOption)
+  let suffix := finishReason?.map (fun reason => s!" (finish_reason={reason})") |>.getD ""
+  let some content := content?
+    | throw s!"API response message has no string content{suffix}"
+  if content.trimAscii.isEmpty then
+    throw s!"API response content is empty{suffix}; increase modelMaxTokens or reduce reasoning effort"
+  return content
 
 private def validSecret (secret : String) : Bool :=
   !secret.any (fun c => c = '\n' || c = '\r')

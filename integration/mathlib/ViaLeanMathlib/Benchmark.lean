@@ -232,4 +232,76 @@ elab (name := vialeanDatasetEval)
   liftM (m := IO) do
     IO.println result.toJson.compress
     (← IO.getStdout).flush
+
+private def evaluateDatasetTargetOnce (dataset split caseName : String)
+    (target : Expr) (cfg : ProposeConfig) : MetaM DatasetCaseResult := do
+  let saved ← saveState
+  let started ← IO.monoMsNow
+  let _ : MonadExceptOf _ MetaM := MonadAlwaysExcept.except
+  try
+    let goal := (← mkFreshExprSyntheticOpaqueMVar target).mvarId!
+    let outcome ← ExecutionBoundary.withoutSpeculativeMessages <|
+      runSearchWithRouter goal cfg (mathlibRouter cfg)
+    saved.restore
+    match outcome with
+    | .solved _ stats =>
+        return datasetResult dataset split caseName true stats
+          0 false 1 "single" cfg.timeoutSec
+    | .failed stats =>
+        return datasetResult dataset split caseName false stats
+          0 false 1 "single" cfg.timeoutSec
+  catch error =>
+    trace[ViaLean.native]
+      "single dataset attempt raised: {error.toMessageData}"
+    saved.restore
+    let elapsed := (← IO.monoMsNow) - started
+    return datasetResult dataset split caseName false { elapsedMs := elapsed }
+      1 false 1 "single-exception" cfg.timeoutSec
+
+declare_command_config_elab datasetEvalOnceConfig ProposeConfig
+
+/-- Evaluate exactly one search configuration. This entrypoint is intended for
+matched neural/symbolic comparisons where retry profiles would confound model
+calls and wall-clock budgets. As with `#vialean_dataset_eval`, failure is
+recorded instead of aborting the remainder of the corpus. -/
+elab (name := vialeanDatasetEvalOnce)
+    "#vialean_dataset_eval_once" dataset:str split:str caseName:str
+    config:optConfig ":" target:term : command => do
+  let cfg ← datasetEvalOnceConfig config
+  let datasetName := dataset.getString
+  let splitName := split.getString
+  let name := caseName.getString
+  let commandStarted ← liftM (m := IO) IO.monoMsNow
+  let result ←
+    try
+      Command.liftTermElabM <| withDatasetRecDepth do
+        let initialLog ← Core.getMessageLog
+        let saved ← saveState
+        let started ← IO.monoMsNow
+        let result ←
+          try
+            let targetExpr ← Term.withoutErrToSorry <| Term.withSynthesize <| Term.elabType target
+            let targetExpr ← instantiateMVars targetExpr
+            let result ← evaluateDatasetTargetOnce datasetName splitName name targetExpr cfg
+            let hadErrors := (← Core.getMessageLog).hasErrors
+            saved.restore
+            Core.setMessageLog initialLog
+            if hadErrors then
+              pure { result with solved := false, internalError := true }
+            else
+              pure result
+          catch _ =>
+            saved.restore
+            Core.setMessageLog initialLog
+            let elapsed := (← IO.monoMsNow) - started
+            pure <| datasetResult datasetName splitName name false { elapsedMs := elapsed }
+              0 true 1 "elaboration" cfg.timeoutSec
+        pure result
+    catch _ =>
+      let elapsed := (← liftM (m := IO) IO.monoMsNow) - commandStarted
+      pure <| datasetResult datasetName splitName name false { elapsedMs := elapsed }
+        0 true 1 "command" cfg.timeoutSec
+  liftM (m := IO) do
+    IO.println result.toJson.compress
+    (← IO.getStdout).flush
 end ViaLean.Mathlib

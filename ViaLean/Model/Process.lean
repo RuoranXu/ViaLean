@@ -86,7 +86,12 @@ def runBoundedProcess
           return .error s!"model response exceeds {maxOutputChars} characters"
         if exitCode = 0 then
           return .ok { exitCode, stdout, stderr }
-        return .error s!"model process exited with {exitCode}: {boundedStderr stderr}"
+        let stderrText := boundedStderr stderr
+        let stdoutText := boundedStderr stdout
+        let detail := if stdoutText.trimAscii.isEmpty then stderrText
+          else if stderrText.trimAscii.isEmpty then s!"response body: {stdoutText}"
+          else s!"{stderrText}; response body: {stdoutText}"
+        return .error s!"model process exited with {exitCode}: {detail}"
     | none =>
         try child.kill catch _ => pure ()
         discard child.wait

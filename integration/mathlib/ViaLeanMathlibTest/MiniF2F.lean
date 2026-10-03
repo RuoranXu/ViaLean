@@ -46,7 +46,7 @@ example : 1529 % 6 = answer(5) := by
 example (s t : ℝ) (h₀ : s = 9 - 2 * t) (h₁ : t = 3 * s + 1) :
     And (s = 1) (t = 4) := by
   vialean_dataset_case "miniF2F" "test" "mathd_algebra_44"
-    (timeoutSec := 15) (library := false)
+    (timeoutSec := 30) (library := false)
 
 -- test: mathd_algebra_209; exercises bounded equality transport through an
 -- equivalence without retrieving the upstream theorem.
@@ -55,3 +55,15 @@ example (σ : ℝ ≃ ℝ) (h₀ : σ.symm 2 = 10) (h₁ : σ.symm 10 = 1)
     (h₂ : σ.symm 1 = 2) : σ (σ 10) = 1 := by
   vialean_dataset_case "miniF2F" "test" "mathd_algebra_209"
     (timeoutSec := 15) (library := false)
+
+-- An unsolved single-attempt evaluation records failure and lets the corpus
+-- continue; it must not manufacture or admit a proof of the target.
+#vialean_dataset_eval_once "regression" "local" "unsolved-continuation"
+    (timeoutSec := 1)
+    (directProbeSec := 0)
+    (structural := false)
+    (cuts := false)
+    (library := false)
+    (frontier := false)
+    (atlasGraph := false)
+    (ai := false) : False

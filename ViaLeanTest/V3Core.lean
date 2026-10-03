@@ -39,6 +39,17 @@ open Lean Meta Elab Tactic ViaLean
 
 #guard
   match ModelProtocol.parsePlannerResponse
+      r#"<think>inspect {non_json_braces} before answering</think>
+```json
+{"root_value":0.65,"confidence":0.75,"thoughts":[{"id":"symm","kind":"exact","expression":"Eq.symm h","dependencies":[]}]}
+```"# with
+  | .ok response => response.rootValue == 0.65 && response.confidence == 0.75 &&
+      response.thoughts.size == 1 && response.thoughts[0]!.id == "symm" &&
+      response.thoughts[0]!.expression? == some "Eq.symm h"
+  | .error _ => false
+
+#guard
+  match ModelProtocol.parsePlannerResponse
       r#"{"thoughts":[{"id":"11","kind":"equality_bridge","expression_ref":"b","dependencies":["2"]},{"id":"12","kind":"helper_lemma","expression":"P ∨ Q"}],"lean_candidates":[{"code":"by exact h"}]}"# with
   | .ok response => response.thoughts.size == 2 &&
       response.thoughts[0]!.expressionRef == "b" &&
