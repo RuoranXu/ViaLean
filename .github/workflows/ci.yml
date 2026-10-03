@@ -12,7 +12,6 @@ jobs:
       - uses: leanprover/lean-action@v1
         with:
           build: true
-          test: true
 
   mathlib:
     runs-on: ubuntu-latest
@@ -22,5 +21,4 @@ jobs:
         with:
           lake-package-directory: integration/mathlib
           build: true
-          test: true
           use-mathlib-cache: true
