@@ -155,7 +155,15 @@ ViaLean treats symbolic transforms, retrieved premises, model plans, and generat
 
 ## Citation
 
-Academic citation metadata is provided in [`CITATION.cff`](CITATION.cff).
+@misc{xu2026symbolicsearchexhaustedpersistent,
+      title={Symbolic Search Is Not Exhausted: Persistent Proof-Space Exploration in Lean4}, 
+      author={Ruoran Xu},
+      year={2026},
+      eprint={2610.04275},
+      archivePrefix={arXiv},
+      primaryClass={cs.LO},
+      url={https://arxiv.org/abs/2610.04275}, 
+}
 
 ## License
 
